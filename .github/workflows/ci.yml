@@ -200,6 +200,32 @@ jobs:
             | tee "$RUNNER_TEMP/issue90-privileged-fixture.log"
           ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-privileged-fixture.log"
           "$toolchain/go/bin/go" vet -mod=vendor ./session/filesync
+          # V51 is an additive POST-V50 reconciliation; all 28 historical
+          # patches, expected trees and their independent replay stay frozen.
+          bridge="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v50-to-c4-v51-dev.patch"
+          echo "c7bf1193a8f3e9d1e83d7cef3600b7a1fca118866a6fa804635bbb0eaf0600d3  $bridge" | sha256sum --check
+          git -C "$scratch" apply --cached --check "$bridge"
+          git -C "$scratch" apply --cached "$bridge"
+          test "$(git -C "$scratch" write-tree)" = b0b1507f6edd67f232728046263dda4fe8f4529e
+          git -C "$scratch" checkout-index -f --all
+          # The V51 test uses the REAL V50 AF_UNIX FD, durable V40 claim,
+          # root-owned V36 publication and V3 Manager, but DOES NOT sign or
+          # complete a C4 owner release. The build-tag gate is DEV-only.
+          sudo env -i PATH=/usr/bin:/bin HOME=/root GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
+            VIRKI_V51_RUN_ROOT_FIXTURE=1 "$toolchain/go/bin/go" test -mod=vendor \
+            -tags virki_c1c4_dev -race -count=1 -timeout 180s -v ./session/filesync \
+            -run '^TestC1V51RealProtectedPublisherFeedsV3Manager$' \
+            | tee "$RUNNER_TEMP/issue90-v51-physical-bridge.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v51-physical-bridge.log"
+          # Source/local and llbsolver still contain upstream go vet
+          # lostcancel diagnostics at their original V50 tree; V51 must not
+          # rewrite unrelated upstream lifetime semantics to mask that debt.
+          "$toolchain/go/bin/go" vet -mod=vendor ./session/filesync ./util/localcontext ./cmd/buildkitd/config ./cmd/buildkitd
+          VIRKI_C4_TEST_SOURCE_DIR="$GITHUB_WORKSPACE/infra/offline/native-owner-authority" \
+            "$toolchain/go/bin/go" test -mod=vendor -race -count=1 -timeout 180s \
+            -v ./util/localcontext -run '^TestVROAV3ServiceWithRealManagerAndNativeDaemon$' \
+            | tee "$RUNNER_TEMP/issue90-v51-native-c4.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v51-native-c4.log"
 
       - name: Production control tests
         run: npm run test:production-revision
