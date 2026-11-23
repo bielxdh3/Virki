@@ -256,6 +256,14 @@ jobs:
             ./session/filesync -run '^TestC1V52FourProtectedContextsOneSolve$' \
             | tee "$RUNNER_TEMP/issue90-v52-four-real-publications.log"
           ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v52-four-real-publications.log"
+          # This regression exists only AFTER the V52 patch. Refuse a
+          # standalone V51 nonce mismatch, but admit four DISTINCT signed
+          # V15 TEST nonces only while V52's protected group gate is pending.
+          "$toolchain/go/bin/go" test -mod=vendor -tags virki_c1c4_dev \
+            -race -count=1 -timeout 180s -v ./util/localcontext \
+            -run '^TestDevV51PreflightV52DistinctPermitNonceRequiresPendingGroup$' \
+            | tee "$RUNNER_TEMP/issue90-v52-preclaim-group-nonce-regression.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v52-preclaim-group-nonce-regression.log"
           # The build-tag is absent in normal BuildKit. All normal packages
           # must keep compiling with the V52 extra gate left at its zero value.
           "$toolchain/go/bin/go" test -mod=vendor -run '^$' ./session/filesync ./util/localcontext ./source/local ./solver/llbsolver ./cmd/buildkitd/config ./cmd/buildkitd
