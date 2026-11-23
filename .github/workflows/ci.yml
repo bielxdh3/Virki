@@ -299,11 +299,18 @@ jobs:
           git -C "$scratch" apply --cached --check "$patch"
           git -C "$scratch" apply --cached "$patch"
           test "$(git -C "$scratch" write-tree)" = a8620ea2ddadbe7125168d8edef8c58cc1b4ddb1
+          # Keep the pinned original BuildKit/C4 patch immutable; the additive
+          # DEV receipt-binding patch hardens its actual VROAV3Service consumer.
+          addon="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-c4-receipt-binding-dev.patch"
+          echo "63c3823a50156a4902ff1e5bc12485a221c242f2c4f6da99d95f4954fc7e4ad5  $addon" | sha256sum --check
+          git -C "$scratch" apply --cached --check "$addon"
+          git -C "$scratch" apply --cached "$addon"
+          test "$(git -C "$scratch" write-tree)" = 056ddc9815176e137117281e2d360a9c10048296
           git -C "$scratch" checkout-index --all
           export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
           export VIRKI_C4_TEST_SOURCE_DIR="$GITHUB_WORKSPACE/infra/offline/native-owner-authority"
           cd "$scratch"
-          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./util/localcontext -run '^(TestVROAV3ServiceWithRealManagerAndNativeDaemon|TestVROAV3BeginRejectsMismatchedExporterIntentBeforeNativeTransfer)$'
+          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./util/localcontext -run '^(TestVROAV3ServiceWithRealManagerAndNativeDaemon|TestVROAV3BeginRejectsMismatchedExporterIntentBeforeNativeTransfer|TestVROAV3SignedCandidateReceiptIsBoundToExactBuildKitRequest)$'
           "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./solver/llbsolver -run '^TestLocalContext'
 
       - name: Native owner authority (C4) cross-UID/GID SO_PEERCRED tests as root

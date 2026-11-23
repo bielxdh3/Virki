@@ -1,0 +1,235 @@
+diff --git a/util/localcontext/service_vroa_v3_linux.go b/util/localcontext/service_vroa_v3_linux.go
+index d22d320..06ecb92 100644
+--- a/util/localcontext/service_vroa_v3_linux.go
++++ b/util/localcontext/service_vroa_v3_linux.go
+@@ -558,7 +558,7 @@ func (s *VROAV3Service) Complete(ctx context.Context, completion Completion) err
+ 	if resp.Status != vroaStatusOK {
+ 		return fmt.Errorf("C4 V3_VERIFY_CANDIDATE refused request with status %d", resp.Status)
+ 	}
+-	receipt, err := s.verifyReceipt(resp, scopeState.envSHA, evidenceSHA)
++	receipt, err := s.verifyReceipt(resp, req)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -654,8 +654,16 @@ func (s *VROAV3Service) decodeAndVerifyApproval(raw []byte, binding Binding) (vr
+ 	return env, nil
+ }
+ 
+-func (s *VROAV3Service) verifyReceipt(resp vroaV3ResponseFrame, expectedApprovalSHA, expectedEvidenceSHA string) (VROAV3CandidateReceipt, error) {
++func (s *VROAV3Service) verifyReceipt(resp vroaV3ResponseFrame, expected vroaV3RequestFrame) (VROAV3CandidateReceipt, error) {
+ 	var receipt VROAV3CandidateReceipt
++	// A genuine C4 DEV receipt from another job remains correctly signed. Its
++	// signature alone must not authorize this BuildKit solve's local candidate.
++	if expected.Version != vroaProtocolVersionV3 || expected.Cmd != vroaCmdV3VerifyCandidate ||
++		expected.Epoch == 0 || vroaCString(expected.ScopeToken[:]) == "" ||
++		vroaCString(expected.ApprovalEnvelopeSHA256[:]) == "" ||
++		vroaCString(expected.TranscriptSHA256[:]) == "" {
++		return receipt, errors.New("incomplete expected VROA_V3 verification request")
++	}
+ 	if resp.AckJSONLen == 0 || resp.AckJSONLen > uint32(len(resp.AckJSON)) {
+ 		return receipt, errors.New("invalid C4 receipt ackJsonLen")
+ 	}
+@@ -668,8 +676,8 @@ func (s *VROAV3Service) verifyReceipt(resp vroaV3ResponseFrame, expectedApproval
+ 		return receipt, err
+ 	}
+ 	if receipt.Version != vroaProtocolVersionV3 || receipt.Status != "CANDIDATE_VERIFIED" ||
+-		receipt.ApprovalEnvelopeSHA256 != expectedApprovalSHA ||
+-		receipt.EvidenceSHA256 != expectedEvidenceSHA ||
++		receipt.ApprovalEnvelopeSHA256 != vroaCString(expected.ApprovalEnvelopeSHA256[:]) ||
++		receipt.EvidenceSHA256 != vroaCString(expected.TranscriptSHA256[:]) ||
+ 		receipt.DeployAuthorized || receipt.WorkerReceiptPairAdmitted || receipt.ReleaseSignature {
+ 		return receipt, errors.New("C4 receipt invariant violation")
+ 	}
+@@ -687,6 +695,50 @@ func (s *VROAV3Service) verifyReceipt(resp vroaV3ResponseFrame, expectedApproval
+ 	if !ed25519.Verify(s.opt.ReceiptPublicKey, msg, sig) {
+ 		return receipt, errors.New("invalid C4 receipt Ed25519 signature")
+ 	}
++	if resp.Epoch != expected.Epoch || receipt.Epoch != expected.Epoch ||
++		resp.SequenceNumber == 0 || receipt.SequenceNumber != resp.SequenceNumber {
++		return receipt, errors.New("signed C4 candidate receipt epoch/sequence differs from BuildKit request")
++	}
++	// Native C4 returns the verification scope in the SIGNED ack, not the
++	// response-frame ScopeToken field (that field is populated by V3_BEGIN).
++	// Refuse unexpected metadata instead of treating an unsigned response
++	// field as proof of scope ownership.
++	if vroaCString(resp.ScopeToken[:]) != "" {
++		return receipt, errors.New("signed C4 candidate receipt has unexpected unsigned response scope")
++	}
++	for _, field := range []struct{ name, signed, expected string }{
++		{"scope", receipt.ScopeToken, vroaCString(expected.ScopeToken[:])},
++		{"receipt signer", receipt.OwnerKeyID, vroaCString(resp.OwnerKeyID[:])},
++		{"approval key", receipt.ApprovalKeyID, vroaCString(expected.ApprovalKeyID[:])},
++		{"approval ID", receipt.ApprovalID, vroaCString(expected.ApprovalID[:])},
++		{"approval serial", receipt.ApprovalSerial, vroaCString(expected.ApprovalSerial[:])},
++		{"job", receipt.JobID, vroaCString(expected.JobID[:])},
++		{"role", receipt.Role, vroaCString(expected.Role[:])},
++		{"nonce", receipt.Nonce, vroaCString(expected.Nonce[:])},
++		{"worker", receipt.WorkerID, vroaCString(expected.SessionID[:])},
++		{"source commit", receipt.SourceCommit, vroaCString(expected.SourceCommit[:])},
++		{"build plan", receipt.BuildPlanSHA256, vroaCString(expected.BuildPlanSHA256[:])},
++		{"executable policy", receipt.ExecutablePolicySHA256, vroaCString(expected.ExecutablePolicySHA256[:])},
++		{"filesync manifest", receipt.FileSyncManifestSHA256, vroaCString(expected.ArchiveSHA256[:])},
++		{"output image", receipt.OutputImageID, vroaCString(expected.OutputImageID[:])},
++	} {
++		if field.signed != field.expected {
++			// Field names are safe diagnostics; never log signed contents or keys.
++			return receipt, fmt.Errorf("signed C4 candidate receipt %s differs from BuildKit VROA_V3 request", field.name)
++		}
++	}
++	if len(receipt.ContextTreeDigests) != len(expected.ExpectedTreeDigests) ||
++		len(receipt.ContextStreamDigests) != len(expected.ExpectedStreamDigests) ||
++		len(receipt.ContextStreamLengths) != len(expected.ExpectedStreamLengths) {
++		return receipt, errors.New("signed C4 candidate receipt context count mismatch")
++	}
++	for i := range expected.ExpectedTreeDigests {
++		if receipt.ContextTreeDigests[i] != vroaCString(expected.ExpectedTreeDigests[i][:]) ||
++			receipt.ContextStreamDigests[i] != strings.TrimPrefix(vroaCString(expected.ExpectedStreamDigests[i][:]), "sha256:") ||
++			receipt.ContextStreamLengths[i] != expected.ExpectedStreamLengths[i] {
++			return receipt, fmt.Errorf("signed C4 candidate receipt context %d differs from BuildKit request", i)
++		}
++	}
+ 	return receipt, nil
+ }
+ 
+diff --git a/util/localcontext/service_vroa_v3_receipt_binding_linux_test.go b/util/localcontext/service_vroa_v3_receipt_binding_linux_test.go
+new file mode 100644
+index 0000000..2336937
+--- /dev/null
++++ b/util/localcontext/service_vroa_v3_receipt_binding_linux_test.go
+@@ -0,0 +1,136 @@
++//go:build linux
++
++package localcontext
++
++import (
++	"crypto/ed25519"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"strings"
++	"testing"
++)
++
++// The C4 DEV signer is not a release authority. A properly signed candidate
++// receipt for job A must not satisfy BuildKit's request for job B, even if the
++// digest and signature of the original receipt remain completely unchanged.
++func TestVROAV3SignedCandidateReceiptIsBoundToExactBuildKitRequest(t *testing.T) {
++	pub, priv, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	put := func(dst []byte, value string) {
++		t.Helper()
++		if err := vroaSetFixedString(dst, value); err != nil {
++			t.Fatal(err)
++		}
++	}
++	var req vroaV3RequestFrame
++	copy(req.Magic[:], vroaMagicV3)
++	req.Version, req.Cmd, req.Epoch = vroaProtocolVersionV3, vroaCmdV3VerifyCandidate, 7
++	put(req.ScopeToken[:], strings.Repeat("a", 64))
++	put(req.SessionID[:], "worker-a")
++	put(req.JobID[:], "build-job-a")
++	put(req.Role[:], "runtime")
++	put(req.Nonce[:], strings.Repeat("b", 32))
++	put(req.SourceCommit[:], strings.Repeat("c", 40))
++	put(req.BuildPlanSHA256[:], strings.Repeat("d", 64))
++	put(req.ExecutablePolicySHA256[:], strings.Repeat("e", 64))
++	put(req.OutputImageID[:], "sha256:"+strings.Repeat("f", 64))
++	put(req.ArchiveSHA256[:], strings.Repeat("1", 64))
++	put(req.TranscriptSHA256[:], strings.Repeat("2", 64))
++	put(req.ApprovalKeyID[:], "approval-key-a")
++	put(req.ApprovalID[:], "approval-a")
++	put(req.ApprovalSerial[:], "serial-a")
++	put(req.ApprovalEnvelopeSHA256[:], strings.Repeat("3", 64))
++	receipt := VROAV3CandidateReceipt{
++		Version: 3, Status: "CANDIDATE_VERIFIED", OwnerKeyID: "receipt-key-a",
++		ApprovalKeyID: "approval-key-a", ApprovalID: "approval-a", ApprovalSerial: "serial-a",
++		ScopeToken: strings.Repeat("a", 64), ApprovalEnvelopeSHA256: strings.Repeat("3", 64),
++		EvidenceSHA256: strings.Repeat("2", 64), JobID: "build-job-a", Role: "runtime",
++		Nonce: strings.Repeat("b", 32), WorkerID: "worker-a",
++		SourceCommit: strings.Repeat("c", 40), BuildPlanSHA256: strings.Repeat("d", 64),
++		ExecutablePolicySHA256: strings.Repeat("e", 64), FileSyncManifestSHA256: strings.Repeat("1", 64),
++		OutputImageID: "sha256:" + strings.Repeat("f", 64), SequenceNumber: 9, Epoch: 7,
++	}
++	for i := 0; i < 4; i++ {
++		tree := "sha256:" + strings.Repeat(string('4'+rune(i)), 64)
++		stream := strings.Repeat(string('8'+rune(i)), 64)
++		put(req.ExpectedTreeDigests[i][:], tree)
++		put(req.ExpectedStreamDigests[i][:], "sha256:"+stream)
++		req.ExpectedStreamLengths[i] = uint64(101 + i)
++		receipt.ContextTreeDigests = append(receipt.ContextTreeDigests, tree)
++		receipt.ContextStreamDigests = append(receipt.ContextStreamDigests, stream)
++		receipt.ContextStreamLengths = append(receipt.ContextStreamLengths, uint64(101+i))
++	}
++	ack, err := json.Marshal(receipt)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(ack) > len(vroaV3ResponseFrame{}.AckJSON) {
++		t.Fatal("test receipt too large")
++	}
++	var resp vroaV3ResponseFrame
++	copy(resp.Magic[:], vroaMagicV3)
++	resp.Version, resp.Status, resp.Epoch, resp.SequenceNumber = vroaProtocolVersionV3, vroaStatusOK, 7, 9
++	// V3_VERIFY response leaves this unsigned frame field blank. The scope is
++	// authenticated exclusively by the Ed25519-signed AckJSON.
++	put(resp.OwnerKeyID[:], "receipt-key-a")
++	resp.AckJSONLen = uint32(len(ack))
++	copy(resp.AckJSON[:], ack)
++	sum := sha256.Sum256(ack)
++	put(resp.CanonicalAckSHA256[:], hex.EncodeToString(sum[:]))
++	put(resp.SignatureBase64[:], base64.StdEncoding.EncodeToString(ed25519.Sign(priv, append([]byte(vroaReceiptDomainV3), ack...))))
++	service := &VROAV3Service{opt: VROAV3Options{ReceiptPublicKey: pub, ReceiptKeyID: "receipt-key-a"}}
++	if _, err := service.verifyReceipt(resp, req); err != nil {
++		t.Fatalf("positive signed receipt rejected: %v", err)
++	}
++	for _, tc := range []struct {
++		name string
++		edit func(*vroaV3RequestFrame)
++	}{
++		{"other job", func(r *vroaV3RequestFrame) { put(r.JobID[:], "build-job-b") }},
++		{"other worker", func(r *vroaV3RequestFrame) { put(r.SessionID[:], "worker-b") }},
++		{"other scope", func(r *vroaV3RequestFrame) { put(r.ScopeToken[:], strings.Repeat("f", 64)) }},
++		{"other evidence", func(r *vroaV3RequestFrame) { put(r.TranscriptSHA256[:], strings.Repeat("f", 64)) }},
++		{"other approval", func(r *vroaV3RequestFrame) { put(r.ApprovalEnvelopeSHA256[:], strings.Repeat("f", 64)) }},
++		{"other image", func(r *vroaV3RequestFrame) { put(r.OutputImageID[:], "sha256:"+strings.Repeat("e", 64)) }},
++		{"other role", func(r *vroaV3RequestFrame) { put(r.Role[:], "migrator") }},
++		{"other nonce", func(r *vroaV3RequestFrame) { put(r.Nonce[:], strings.Repeat("f", 32)) }},
++		{"other source commit", func(r *vroaV3RequestFrame) { put(r.SourceCommit[:], strings.Repeat("f", 40)) }},
++		{"other manifest", func(r *vroaV3RequestFrame) { put(r.ArchiveSHA256[:], strings.Repeat("f", 64)) }},
++		{"other approval ID", func(r *vroaV3RequestFrame) { put(r.ApprovalID[:], "approval-b") }},
++		{"other approval serial", func(r *vroaV3RequestFrame) { put(r.ApprovalSerial[:], "serial-b") }},
++		{"other tree digest", func(r *vroaV3RequestFrame) { put(r.ExpectedTreeDigests[0][:], "sha256:"+strings.Repeat("e", 64)) }},
++		{"other stream digest", func(r *vroaV3RequestFrame) { put(r.ExpectedStreamDigests[0][:], "sha256:"+strings.Repeat("e", 64)) }},
++		{"other stream length", func(r *vroaV3RequestFrame) { r.ExpectedStreamLengths[0]++ }},
++		{"other epoch", func(r *vroaV3RequestFrame) { r.Epoch++ }},
++		{"wrong command", func(r *vroaV3RequestFrame) { r.Cmd = vroaCmdV3Abort }},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			swapped := req
++			tc.edit(&swapped)
++			if _, err := service.verifyReceipt(resp, swapped); err == nil {
++				t.Fatal("a genuine C4 DEV signed receipt was accepted for another BuildKit request")
++			}
++		})
++	}
++	for _, tc := range []struct {
++		name string
++		edit func(*vroaV3ResponseFrame)
++	}{
++		{"other response epoch", func(r *vroaV3ResponseFrame) { r.Epoch++ }},
++		{"other response sequence", func(r *vroaV3ResponseFrame) { r.SequenceNumber++ }},
++		{"other response scope", func(r *vroaV3ResponseFrame) { put(r.ScopeToken[:], strings.Repeat("e", 64)) }},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			swapped := resp
++			tc.edit(&swapped)
++			if _, err := service.verifyReceipt(swapped, req); err == nil {
++				t.Fatal("signed candidate receipt was accepted with altered response metadata")
++			}
++		})
++	}
++}
