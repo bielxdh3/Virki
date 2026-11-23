@@ -1,0 +1,150 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createServer, request as httpRequest } from 'node:http';
+import { once } from 'node:events';
+import { join, resolve } from 'node:path';
+import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { chromium } from '@playwright/test';
+
+const root = resolve(import.meta.dirname, '../..');
+const app = join(root, 'apps/hub');
+const sessionCookie = '__Host-virki_session=issue119-synthetic';
+const host = 'hub.biel.dev.br';
+
+async function listen(server) {
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  return server.address().port;
+}
+
+async function reservePort() {
+  const server = createServer();
+  const port = await listen(server);
+  await new Promise((resolveClose) => server.close(resolveClose));
+  return port;
+}
+
+function request(port, path, extraHeaders = {}) {
+  return new Promise((resolveRequest, rejectRequest) => {
+    const req = httpRequest({ hostname: '127.0.0.1', port, path, method: 'GET',
+      headers: { host, accept: 'text/html', ...extraHeaders } }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('error', rejectRequest);
+      res.on('end', () => resolveRequest({ status: res.statusCode,
+        headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', rejectRequest);
+    req.end();
+  });
+}
+
+function assertHeaders(response, status) {
+  assert.equal(response.status, status);
+  assert.match(response.headers['content-type'] ?? '', /^text\/html; charset=utf-8/u);
+  assert.equal(response.headers['x-powered-by'], undefined);
+  assert.equal(response.headers['strict-transport-security'], 'max-age=31536000');
+  const csp = response.headers['content-security-policy'] ?? '';
+  assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/iu);
+  const nonce = /'nonce-([^']+)'/u.exec(csp)?.[1];
+  assert.ok(nonce, `missing CSP nonce on HTTP ${status}`);
+  return nonce;
+}
+
+test('Hub production 200/404 use nonce-bearing Next scripts and CSP-compatible 404 styles in a real HTML5 browser', { timeout: 90000 }, async () => {
+  const port = await reservePort();
+  const node = spawn(process.execPath, [join(root, 'node_modules/next/dist/bin/next'), 'start',
+    '-p', String(port), '-H', '127.0.0.1'], {
+    cwd: app, windowsHide: true, stdio: 'ignore',
+    env: { ...process.env, NODE_ENV: 'production',
+      VIRKI_CSRF_SIGNING_KEY: '11'.repeat(32), VIRKI_HUB_PERIMETER_MODE: 'native',
+      VIRKI_HUB_HOSTNAME: host, VIRKI_PORTAL_HOSTNAME: 'portal.biel.dev.br' }
+  });
+  let browser;
+  let proxy;
+  try {
+    let ready = false;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (node.exitCode !== null) break;
+      try {
+        const health = await request(port, '/api/health');
+        if (health.status === 200) { ready = true; break; }
+      } catch { /* Next is still starting. */ }
+      await delay(100);
+    }
+    assert.ok(ready, 'disposable Hub did not start');
+
+    // Native Next renders the 404 only after the proxy's session-present gate.
+    // No database, valid session or production service is used by this fixture.
+    const login = await request(port, '/login');
+    const notFound = await request(port, '/missing-issue119', { cookie: sessionCookie });
+    const loginNonce = assertHeaders(login, 200);
+    const notFoundNonce = assertHeaders(notFound, 404);
+    assert.notEqual(loginNonce, notFoundNonce, 'CSP nonce was reused between responses');
+    assert.doesNotMatch(notFound.body, /\sstyle=/iu, '404 server HTML embeds forbidden inline style attributes');
+
+    // A loopback-only HTTP forwarder preserves the canonical Host upstream, and
+    // lets Chromium test production CSP without relying on real DNS or TLS.
+    proxy = createServer((downstream, response) => {
+      const headers = { ...downstream.headers, host };
+      if (downstream.url === '/missing-issue119') headers.cookie = sessionCookie;
+      else delete headers.cookie;
+      const upstream = httpRequest({ hostname: '127.0.0.1', port,
+        method: downstream.method, path: downstream.url, headers }, (upstreamResponse) => {
+        response.writeHead(upstreamResponse.statusCode, upstreamResponse.headers);
+        upstreamResponse.pipe(response);
+      });
+      upstream.on('error', () => response.destroy());
+      downstream.pipe(upstream);
+    });
+    const proxyPort = await listen(proxy);
+    browser = await chromium.launch({ headless: true,
+      ...(process.env.VIRKI_ISSUE119_BROWSER_CHANNEL
+        ? { channel: process.env.VIRKI_ISSUE119_BROWSER_CHANNEL } : {}) });
+    const page = await browser.newPage();
+    const pageErrors = [];
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    await page.addInitScript(() => {
+      window.__issue119Violations = [];
+      document.addEventListener('securitypolicyviolation', (event) =>
+        window.__issue119Violations.push(event.effectiveDirective));
+    });
+    const snapshots = [];
+    for (const [path, expectedStatus] of [['/login', 200], ['/missing-issue119', 404]]) {
+      const documentResponse = await page.goto(`http://127.0.0.1:${proxyPort}${path}`,
+        { waitUntil: 'networkidle' });
+      assert.equal(documentResponse?.status(), expectedStatus, `${path} browser status`);
+      const headers = await documentResponse.allHeaders();
+      const nonce = /'nonce-([^']+)'/u.exec(headers['content-security-policy'] ?? '')?.[1];
+      assert.ok(nonce, `${path} browser CSP nonce missing`);
+      const inspected = await page.evaluate(() => ({
+        scripts: [...document.scripts].filter((script) =>
+          !script.type || script.type === 'module' || /javascript|ecmascript/iu.test(script.type))
+          .map((script) => ({ nonce: script.nonce, inline: !script.src && !!script.textContent?.trim() })),
+        styleTagNonces: [...document.querySelectorAll('style')].map((style) => style.nonce),
+        violations: window.__issue119Violations,
+        heading: document.querySelector('h1')?.textContent ?? '',
+        hasNext: !!window.next
+      }));
+      assert.ok(inspected.scripts.some((script) => script.inline), `${path}: missing hydration bootstrap`);
+      snapshots.push({ path, inspected, nonce });
+    }
+
+    for (const { path, inspected, nonce } of snapshots) {
+      assert.ok(inspected.scripts.every((script) => script.nonce === nonce),
+        `${path}: real HTML5 parser found executable scripts missing the response CSP nonce`);
+      assert.equal(inspected.violations.length, 0,
+        `${path}: browser enforced CSP rejected resource or inline code`);
+      assert.equal(inspected.hasNext, true, `${path}: Next runtime did not execute`);
+    }
+    assert.ok(snapshots[1].inspected.styleTagNonces.every((nonce) => nonce === snapshots[1].nonce),
+      '404 rendered an inline stylesheet without the request CSP nonce');
+    assert.match(snapshots[1].inspected.heading, /404/u);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser?.close();
+    if (proxy) await new Promise((resolveClose) => proxy.close(resolveClose));
+    node.kill();
+  }
+});

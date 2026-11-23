@@ -773,6 +773,9 @@ jobs:
           trap 'unset cleanup_url; rm -f -- "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE" || true' EXIT
           VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- e2e/authenticated-journeys.spec.mts e2e/oidc-authorization-code.spec.mts
 
+      - name: Verify Hub production 200/404 CSP in real Chromium
+        run: npm run test:issue119:hub-browser
+
       - name: Remove disposable PostgreSQL
         if: always()
         shell: bash
