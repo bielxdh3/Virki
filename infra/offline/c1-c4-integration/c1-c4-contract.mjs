@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash, createPublicKey, verify } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 
@@ -403,12 +403,18 @@ function writeAtomicState(filePath, nextState) {
     // allowing any new transaction to inspect this state. If the filesystem
     // cannot persist this marker, fail rather than manufacture durability.
     try {
-      const restoreFd = openSync(pendingPath, flags, 0o600);
+      // Do not check-and-reopen the previously removed pending pathname:
+      // another same-UID writer could replace it between those operations.
+      // Restore from a fresh exclusive inode, then atomically replace whatever
+      // occupies the fixed name (including a dangling symlink) with rename.
+      const restoreTmp = `${pendingPath}.restore.${randomBytes(12).toString("hex")}`;
+      const restoreFd = openSync(restoreTmp, flags, 0o600);
       try {
         fsyncSync(restoreFd);
       } finally {
         closeSync(restoreFd);
       }
+      renameSync(restoreTmp, pendingPath);
       fsyncParentDir(filePath);
     } catch (restoreError) {
       throw new AggregateError([error, restoreError],

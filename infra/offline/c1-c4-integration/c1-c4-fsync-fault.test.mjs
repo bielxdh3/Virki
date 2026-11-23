@@ -44,7 +44,9 @@ function failParentSyncWhen(file, condition, action) {
   };
   syncBuiltinESMExports();
   try {
-    assert.throws(action, /SYNTHETIC_POST_RENAME_PARENT_FSYNC_EIO/u);
+    assert.throws(action, (error) =>
+      error?.message?.includes("SYNTHETIC_POST_RENAME_PARENT_FSYNC_EIO") ||
+      error?.errors?.some((inner) => inner?.message?.includes("SYNTHETIC_POST_RENAME_PARENT_FSYNC_EIO")) === true);
   } finally {
     fs.fsyncSync = original;
     syncBuiltinESMExports();
@@ -72,6 +74,18 @@ test("C1->C4 DEV state reestablishes the recovery marker when final marker-unlin
 }, (t) => {
   const file = fixture(t);
   failParentSyncWhen(file, () => !fs.existsSync(`${file}.pending`), () => prepare(file));
+  assertAmbiguityFenced(file);
+});
+
+test("C1->C4 DEV ambiguous-fsync marker recovery atomically replaces a substituted dangling symlink", {
+  skip: process.platform !== "linux",
+}, (t) => {
+  const file = fixture(t);
+  failParentSyncWhen(file, () => {
+    if (fs.existsSync(`${file}.pending`)) return false;
+    fs.symlinkSync(`${file}.not-found`, `${file}.pending`);
+    return true;
+  }, () => prepare(file));
   assertAmbiguityFenced(file);
 });
 

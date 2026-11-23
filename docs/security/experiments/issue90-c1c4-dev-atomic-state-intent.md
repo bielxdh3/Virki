@@ -38,6 +38,17 @@ the marker instead of treating the ambiguous state as committed. Failure to
 restore that marker is itself reported as an unresolvable durability error;
 it is never silently counted as a successful commit.
 
+The hosted CodeQL run on `d7b25a7` found a new `js/file-system-race` in the
+initial recovery implementation: following an unlink of the fixed `.pending`
+name, a later `openSync` on that same name could race a same-UID replacement.
+A new RED fixture installs a **dangling symlink** after marker removal and
+before the injected parent fsync failure; the old recovery could not restore
+a regular marker (5 pass / 1 fail in the focused six-test baseline suite).
+The correction creates a fresh random, exclusive `.pending.restore.<nonce>`
+inode, fsyncs it, atomically renames it over the fixed marker pathname, and
+fsyncs the parent. This avoids check-then-reopen on the attacked name while
+preserving fail-closed behavior. The new fixture is GREEN after correction.
+
 `c1-c4-fsync-fault.test.mjs` covers real `fsyncSync` fault injection after
 rename, after final marker removal, abrupt process exit with intent persisted,
 refusal of dangling/substituted intent markers, and ordinary successful
