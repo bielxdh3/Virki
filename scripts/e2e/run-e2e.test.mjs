@@ -52,7 +52,7 @@ test("isolated browser runner pins the official image to the locked Playwright v
   const chromium = browsers.browsers.find((browser) => browser.name === "chromium-headless-shell");
   assert.ok(playwrightVersion && chromium?.revision, "the lockfile and installed browser manifest must be available");
   const runner = readFileSync(resolve(scriptDirectory, "run-isolated-linux-docker.ps1"), "utf8");
-  assert.match(runner, /\$playwrightBrowserImage = 'mcr\.microsoft\.com\/playwright@sha256:[a-f0-9]{64}'/u);
+  assert.match(runner, /\$playwrightBrowserImage = 'mcr\.microsoft\.com\/playwright@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579'/u);
   assert.ok(runner.includes(`$script:playwrightVersion -ne 'Version ${playwrightVersion}'`), "the runner rejects a Playwright package version that differs from the lockfile");
   assert.ok(runner.includes(`$script:browserRevision -ne '${chromium.revision}'`), "the runner rejects a Chromium revision that differs from Playwright's manifest");
   assert.ok(runner.includes(`/ms-playwright/chromium_headless_shell-${chromium.revision}/`), "the browser volume must mount the exact locked Chromium revision");
@@ -890,7 +890,7 @@ test("isolated runner journals reviewed Docker create operations and removes ver
   assert.match(script, /Write-DockerMutationJournal 'RECONCILIATION_REQUIRED'/u);
   assert.match(script, /Assert-OwnedDockerIdentity \$Kind \$name \$id \$id/u);
   assert.match(script, /Invoke-PinnedDocker container rm --force --volumes \$id/u);
-  assert.match(script, /type=volume,target=\/ms-playwright\/chromium_headless_shell-1254/u);
+  assert.match(script, /type=volume,target=\/ms-playwright\/chromium_headless_shell-1255/u);
   assert.match(script, /Docker-managed anonymous browser volume was not removed/u);
   assert.doesNotMatch(script, /Invoke-PinnedDocker volume rm/u,
     "Docker volume names are mutable; cleanup must use the owned seed's immutable ID");
