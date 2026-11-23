@@ -11,6 +11,7 @@ COPY packages/auth/package*.json ./packages/auth/
 COPY packages/database/package*.json ./packages/database/
 COPY packages/database/prisma ./packages/database/prisma
 COPY packages/database/scripts ./packages/database/scripts
+COPY vendor/prisma-config-6.19.3/ ./vendor/prisma-config-6.19.3/
 RUN npm ci
 
 COPY . .

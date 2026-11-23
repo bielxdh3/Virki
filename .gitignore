@@ -2,6 +2,8 @@ node_modules/
 .next/
 out/
 dist/
+!vendor/prisma-config-6.19.3/dist/
+!vendor/prisma-config-6.19.3/dist/**
 build/
 coverage/
 

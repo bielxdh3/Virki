@@ -20,6 +20,7 @@ COPY packages/database/package*.json ./packages/database/
 COPY packages/oidc-node/package*.json ./packages/oidc-node/
 COPY packages/database/prisma ./packages/database/prisma
 COPY packages/database/scripts ./packages/database/scripts
+COPY vendor/prisma-config-6.19.3/ ./vendor/prisma-config-6.19.3/
 RUN npm ci
 
 COPY . .
@@ -68,6 +69,7 @@ COPY apps/issuer/package*.json ./apps/issuer/
 COPY packages/auth/package*.json ./packages/auth/
 COPY packages/database/package*.json ./packages/database/
 COPY packages/oidc-node/package*.json ./packages/oidc-node/
+COPY vendor/prisma-config-6.19.3/ ./vendor/prisma-config-6.19.3/
 RUN npm ci --omit=dev --omit=peer --omit=optional --ignore-scripts --no-audit
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS production
