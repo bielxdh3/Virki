@@ -1,0 +1,780 @@
+diff --git a/session/filesync/sealed_publication_v51_v3_linux.go b/session/filesync/sealed_publication_v51_v3_linux.go
+index f153f15..2b8bf55 100644
+--- a/session/filesync/sealed_publication_v51_v3_linux.go
++++ b/session/filesync/sealed_publication_v51_v3_linux.go
+@@ -42,6 +42,13 @@ func PublishV51DevContextToV3(ctx context.Context, manager *localcontext.Manager
+ 		record.SessionID != manifest.SessionID || record.Name == "" {
+ 		return errors.New("V51 DEV worker/context/session differs from frozen V15 manifest")
+ 	}
++	// V51R: validate the actual, live Manager solve scope without any mutation
++	// BEFORE V40's irreversible claim or V36's protected publication. This
++	// rejects optional Managers and absent/wrong/expired scopes. Retain the
++	// post-copy ContextConsumed recheck to handle concurrent invalidation.
++	if err := manager.DevV51Preflight(ctx, manifest.Nonce, record); err != nil {
++		return fmt.Errorf("V51R DEV preclaim owner-scope authorization refused: %w", err)
++	}
+ 	// No bytes from the receiver and no user-controlled FD are passed to V3
+ 	// directly. V39 first consumes the V40 permit and V36 publishes a fresh
+ 	// root-owned verified copy in a separately protected directory.
+diff --git a/session/filesync/sealed_publication_v51r_optional_linux_test.go b/session/filesync/sealed_publication_v51r_optional_linux_test.go
+new file mode 100644
+index 0000000..74a991f
+--- /dev/null
++++ b/session/filesync/sealed_publication_v51r_optional_linux_test.go
+@@ -0,0 +1,274 @@
++//go:build linux && virki_c1c4_dev
++
++package filesync
++
++import (
++	"context"
++	"crypto/ed25519"
++	"crypto/rand"
++	"encoding/base64"
++	"errors"
++	"io"
++	"net"
++	"os"
++	"os/exec"
++	"os/user"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/moby/buildkit/util/localcontext"
++	"golang.org/x/sys/unix"
++)
++
++func TestC1V51RRefusesOptionalManagerWithoutScope(t *testing.T) {
++	const uid uint32 = 60018
++	const content = "V51-PHYSICAL-PROTECTED-BYTES"
++	if os.Getenv("VIRKI_V51_TEST_CHILD") == "sender" {
++		if os.Getuid() != int(uid) {
++			t.Fatal("V51 sender not launched with the independently pinned UID")
++		}
++		source, err := os.Open(os.Getenv("VIRKI_V51_SOURCE"))
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer source.Close()
++		conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: os.Getenv("VIRKI_V51_SOCKET"), Net: "unix"})
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer conn.Close()
++		if _, _, err := conn.WriteMsgUnix([]byte{'V'}, unix.UnixRights(int(source.Fd())), nil); err != nil {
++			t.Fatal(err)
++		}
++		return
++	}
++	if os.Getenv("VIRKI_V51_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("requires explicitly opted-in disposable Linux root V51 publication")
++	}
++	if _, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
++		t.Skip("V51 synthetic sender UID already belongs to an actual user")
++	}
++	base, err := os.MkdirTemp("/var/tmp", "virki-v51-dev-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = os.RemoveAll(base) })
++	if err := os.Chmod(base, 0711); err != nil {
++		t.Fatal(err)
++	}
++	protected := filepath.Join(base, "protected")
++	source := filepath.Join(base, "sender-source")
++	ledger := filepath.Join(base, "ledger")
++	for _, dir := range []string{protected, source, ledger, v40TrustDir(ledger)} {
++		if err := os.Mkdir(dir, 0700); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if err := os.WriteFile(filepath.Join(source, "app.js"), []byte(content), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(filepath.Join(source, "app.js"), int(uid), int(uid)); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(source, int(uid), int(uid)); err != nil {
++		t.Fatal(err)
++	}
++	manifest := V15SealedManifest{
++		Schema: "virki-c1-v15-memory-fs-1", ContextName: "source",
++		WorkerID: "worker-v51", SessionID: "sess-source",
++		Nonce: strings.Repeat("a", 32),
++		Files: []V15FilePin{{Path: "app.js", SHA256: v15Hash([]byte(content)), Size: int64(len(content))}},
++		Bytes: int64(len(content)),
++	}
++	manifest.Digest = v15ManifestDigest(manifest)
++	pub, priv, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	macKey := make([]byte, 32)
++	if _, err := rand.Read(macKey); err != nil {
++		t.Fatal(err)
++	}
++	trust := v40TrustDir(ledger)
++	for path, data := range map[string][]byte{
++		filepath.Join(ledger, v40LogName):       nil,
++		filepath.Join(trust, v40KeyName):        macKey,
++		filepath.Join(trust, v40CheckpointName): v40InitialCheckpoint(ledger, pub, macKey),
++	} {
++		mode := os.FileMode(0600)
++		if filepath.Base(path) == v40KeyName {
++			mode = 0400
++		}
++		if err := os.WriteFile(path, data, mode); err != nil {
++			t.Fatal(err)
++		}
++		f, err := os.Open(path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := f.Sync(); err != nil {
++			t.Fatal(err)
++		}
++		if err := f.Close(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	for _, dir := range []string{trust, ledger} {
++		fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := unix.Fsync(fd); err != nil {
++			t.Fatal(err)
++		}
++		_ = unix.Close(fd)
++	}
++	permit := V15OwnerPermit{
++		Domain: V15OwnerDomain, ApprovalID: "v51-test-only",
++		ManifestDigest: manifest.Digest, WorkerID: manifest.WorkerID,
++		SessionID: manifest.SessionID, ContextName: manifest.ContextName,
++		Nonce: manifest.Nonce, Epoch: 7, ExpiresUnix: time.Now().Add(time.Hour).Unix(),
++	}
++	permit.Signature = ed25519.Sign(priv, v15PermitBytes(permit))
++
++	// Expected owner tree is measured INDEPENDENTLY before receiving a sender
++	// FD; the actual source of data for the V3 record remains the V36 copy.
++	reference := filepath.Join(protected, "owner-expected")
++	if err := os.Mkdir(reference, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(reference, "app.js"), []byte(content), 0600); err != nil {
++		t.Fatal(err)
++	}
++	expected, expectedStream, err := BuildLocalContextStream(reference, "source", MaxLocalContextStreamBytes)
++	if err != nil {
++		t.Fatal(err)
++	}
++	intent, err := localcontext.NewExporterIntent("image", 0, map[string]string{"name": "127.0.0.1:5000/virki/v51:dev"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	identities, treeDigests, sessions := make(map[string]string), make(map[string]string), make(map[string]string)
++	for _, name := range localcontext.RequiredContextNames() {
++		identities[name] = "ctxid-" + name
++		treeDigests[name] = expected.TreeDigest
++		sessions[name] = "sess-" + name
++	}
++	auth := localcontext.Authorization{
++		Token: "dev-v51-test-scope", Generation: manifest.Nonce, WorkerID: manifest.WorkerID,
++		ContextIdentities: identities, ContextTreeDigestSchema: expected.TreeDigestSchema,
++		ContextTreeDigests: treeDigests, ContextSessionIDsV8: sessions,
++		ExporterPolicy: intent, ExpectedImage: localcontext.ImageDescriptor{
++			MediaType: "application/vnd.oci.image.manifest.v1+json",
++			Digest:    "sha256:" + strings.Repeat("b", 64), Size: 100,
++		}, ExpiresAt: time.Now().Add(30 * time.Minute),
++	}
++	manager, err := localcontext.NewManager(&v51DEVScope{auth: auth}, false)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, scope, err := manager.BeginSolve(context.Background(), localcontext.Binding{
++		JobID: "job-v51-dev", Role: "runtime", Nonce: manifest.Nonce,
++		ApprovalID: "dev-v51-test", ApprovalEnvelope: base64.StdEncoding.EncodeToString([]byte("DEV nonauthorizing fixture")),
++		Exporter: intent,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Start a real distinct-UID sender, with the actual Go test executable
++	// copied into a root-owned executable path and no root keys in the child.
++	self, err := os.Executable()
++	if err != nil {
++		t.Fatal(err)
++	}
++	input, err := os.Open(self)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer input.Close()
++	helper := filepath.Join(base, "v51-child")
++	output, err := os.OpenFile(helper, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0555)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := io.Copy(output, input); err != nil {
++		t.Fatal(err)
++	}
++	if err := output.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(helper, 0555); err != nil {
++		t.Fatal(err)
++	}
++	socket := filepath.Join(base, "v51.sock")
++	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	if err := v50ArmPasscredBeforeAccept(listener); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(socket, 0, int(uid)); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(socket, 0660); err != nil {
++		t.Fatal(err)
++	}
++	cmd := exec.Command(helper, "-test.run=^TestC1V51RRefusesOptionalManagerWithoutScope$")
++	cmd.Env = append(os.Environ(), "VIRKI_V51_TEST_CHILD=sender", "VIRKI_V51_SOURCE="+source, "VIRKI_V51_SOCKET="+socket)
++	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: uid, Groups: []uint32{}}}
++	if err := cmd.Start(); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if cmd.ProcessState == nil {
++			_ = cmd.Process.Kill()
++			_ = cmd.Wait()
++		}
++	})
++	if err := listener.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	conn, err := listener.AcceptUnix()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	record := localcontext.Consumption{
++		Name: "source", WorkerID: manifest.WorkerID, SessionID: manifest.SessionID,
++		VertexDigest: "sha256:" + strings.Repeat("c", 64),
++		SnapshotID:   "snap-v51", VertexOutputIndex: 0,
++	}
++	dest := filepath.Join(protected, "candidate-v51")
++	// A forged V3 worker identity must be refused BEFORE V40 spends the
++	// one-use V15 test permit and before V36 publishes anything.
++	hostileRecord := record
++	hostileRecord.WorkerID = "untrusted-worker"
++	if err := PublishV51DevContextToV3(ctx, manager, ledger, conn, cmd.Process.Pid, uid, uid,
++		dest, manifest, permit, pub, 7, 8, hostileRecord); err == nil ||
++		!strings.Contains(err.Error(), "differs from frozen") {
++		t.Fatalf("V51 must refuse hostile worker before durable permit use: %v", err)
++	}
++	claims, err := os.ReadFile(filepath.Join(ledger, v40LogName))
++	if err != nil || len(claims) != 0 {
++		t.Fatalf("hostile V51 worker burned a V40 permit: len=%d err=%v", len(claims), err)
++	}
++	if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("hostile V51 worker published without authority: %v", err)
++	}
++	if err := PublishV51DevContextToV3(context.Background(), manager, ledger, conn, cmd.Process.Pid, uid, uid,
++        dest, manifest, permit, pub, 7, 8, record); err == nil {
++        t.Error("V51R must reject absent V3 scope even with optional Manager")
++    }
++    if err := cmd.Wait(); err != nil { t.Fatal(err) }
++    claims, err = os.ReadFile(filepath.Join(ledger, v40LogName))
++    if err != nil || len(claims) != 0 { t.Errorf("V51R must leave V40 claim ledger unmodified without V3 authorization: bytes=%d err=%v", len(claims), err) }
++    if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) { t.Errorf("V51R must not publish destination before V3 authorization: %v", err) }
++    if _, _, _, err := scope.CausalInputs(); err == nil { t.Error("V51R optional unscoped attempt was admitted as four-context proof") }
++    _ = expectedStream
++}
+\ No newline at end of file
+diff --git a/session/filesync/sealed_publication_v51r_preclaim_linux_test.go b/session/filesync/sealed_publication_v51r_preclaim_linux_test.go
+new file mode 100644
+index 0000000..5b8eae7
+--- /dev/null
++++ b/session/filesync/sealed_publication_v51r_preclaim_linux_test.go
+@@ -0,0 +1,276 @@
++//go:build linux && virki_c1c4_dev
++
++package filesync
++
++import (
++	"context"
++	"crypto/ed25519"
++	"crypto/rand"
++	"encoding/base64"
++	"errors"
++	"io"
++	"net"
++	"os"
++	"os/exec"
++	"os/user"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/moby/buildkit/util/localcontext"
++	"golang.org/x/sys/unix"
++)
++
++func TestC1V51RRequiresScopeBeforeClaim(t *testing.T) {
++	const uid uint32 = 60018
++	const content = "V51-PHYSICAL-PROTECTED-BYTES"
++	if os.Getenv("VIRKI_V51_TEST_CHILD") == "sender" {
++		if os.Getuid() != int(uid) {
++			t.Fatal("V51 sender not launched with the independently pinned UID")
++		}
++		source, err := os.Open(os.Getenv("VIRKI_V51_SOURCE"))
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer source.Close()
++		conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: os.Getenv("VIRKI_V51_SOCKET"), Net: "unix"})
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer conn.Close()
++		if _, _, err := conn.WriteMsgUnix([]byte{'V'}, unix.UnixRights(int(source.Fd())), nil); err != nil {
++			t.Fatal(err)
++		}
++		return
++	}
++	if os.Getenv("VIRKI_V51_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("requires explicitly opted-in disposable Linux root V51 publication")
++	}
++	if _, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
++		t.Skip("V51 synthetic sender UID already belongs to an actual user")
++	}
++	base, err := os.MkdirTemp("/var/tmp", "virki-v51-dev-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = os.RemoveAll(base) })
++	if err := os.Chmod(base, 0711); err != nil {
++		t.Fatal(err)
++	}
++	protected := filepath.Join(base, "protected")
++	source := filepath.Join(base, "sender-source")
++	ledger := filepath.Join(base, "ledger")
++	for _, dir := range []string{protected, source, ledger, v40TrustDir(ledger)} {
++		if err := os.Mkdir(dir, 0700); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if err := os.WriteFile(filepath.Join(source, "app.js"), []byte(content), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(filepath.Join(source, "app.js"), int(uid), int(uid)); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(source, int(uid), int(uid)); err != nil {
++		t.Fatal(err)
++	}
++	manifest := V15SealedManifest{
++		Schema: "virki-c1-v15-memory-fs-1", ContextName: "source",
++		WorkerID: "worker-v51", SessionID: "sess-source",
++		Nonce: strings.Repeat("a", 32),
++		Files: []V15FilePin{{Path: "app.js", SHA256: v15Hash([]byte(content)), Size: int64(len(content))}},
++		Bytes: int64(len(content)),
++	}
++	manifest.Digest = v15ManifestDigest(manifest)
++	pub, priv, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	macKey := make([]byte, 32)
++	if _, err := rand.Read(macKey); err != nil {
++		t.Fatal(err)
++	}
++	trust := v40TrustDir(ledger)
++	for path, data := range map[string][]byte{
++		filepath.Join(ledger, v40LogName):       nil,
++		filepath.Join(trust, v40KeyName):        macKey,
++		filepath.Join(trust, v40CheckpointName): v40InitialCheckpoint(ledger, pub, macKey),
++	} {
++		mode := os.FileMode(0600)
++		if filepath.Base(path) == v40KeyName {
++			mode = 0400
++		}
++		if err := os.WriteFile(path, data, mode); err != nil {
++			t.Fatal(err)
++		}
++		f, err := os.Open(path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := f.Sync(); err != nil {
++			t.Fatal(err)
++		}
++		if err := f.Close(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	for _, dir := range []string{trust, ledger} {
++		fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := unix.Fsync(fd); err != nil {
++			t.Fatal(err)
++		}
++		_ = unix.Close(fd)
++	}
++	permit := V15OwnerPermit{
++		Domain: V15OwnerDomain, ApprovalID: "v51-test-only",
++		ManifestDigest: manifest.Digest, WorkerID: manifest.WorkerID,
++		SessionID: manifest.SessionID, ContextName: manifest.ContextName,
++		Nonce: manifest.Nonce, Epoch: 7, ExpiresUnix: time.Now().Add(time.Hour).Unix(),
++	}
++	permit.Signature = ed25519.Sign(priv, v15PermitBytes(permit))
++
++	// Expected owner tree is measured INDEPENDENTLY before receiving a sender
++	// FD; the actual source of data for the V3 record remains the V36 copy.
++	reference := filepath.Join(protected, "owner-expected")
++	if err := os.Mkdir(reference, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(reference, "app.js"), []byte(content), 0600); err != nil {
++		t.Fatal(err)
++	}
++	expected, expectedStream, err := BuildLocalContextStream(reference, "source", MaxLocalContextStreamBytes)
++	if err != nil {
++		t.Fatal(err)
++	}
++	intent, err := localcontext.NewExporterIntent("image", 0, map[string]string{"name": "127.0.0.1:5000/virki/v51:dev"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	identities, treeDigests, sessions := make(map[string]string), make(map[string]string), make(map[string]string)
++	for _, name := range localcontext.RequiredContextNames() {
++		identities[name] = "ctxid-" + name
++		treeDigests[name] = expected.TreeDigest
++		sessions[name] = "sess-" + name
++	}
++	auth := localcontext.Authorization{
++		Token: "dev-v51-test-scope", Generation: manifest.Nonce, WorkerID: manifest.WorkerID,
++		ContextIdentities: identities, ContextTreeDigestSchema: expected.TreeDigestSchema,
++		ContextTreeDigests: treeDigests, ContextSessionIDsV8: sessions,
++		ExporterPolicy: intent, ExpectedImage: localcontext.ImageDescriptor{
++			MediaType: "application/vnd.oci.image.manifest.v1+json",
++			Digest:    "sha256:" + strings.Repeat("b", 64), Size: 100,
++		}, ExpiresAt: time.Now().Add(30 * time.Minute),
++	}
++	manager, err := localcontext.NewManager(&v51DEVScope{auth: auth}, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, scope, err := manager.BeginSolve(context.Background(), localcontext.Binding{
++		JobID: "job-v51-dev", Role: "runtime", Nonce: manifest.Nonce,
++		ApprovalID: "dev-v51-test", ApprovalEnvelope: base64.StdEncoding.EncodeToString([]byte("DEV nonauthorizing fixture")),
++		Exporter: intent,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Start a real distinct-UID sender, with the actual Go test executable
++	// copied into a root-owned executable path and no root keys in the child.
++	self, err := os.Executable()
++	if err != nil {
++		t.Fatal(err)
++	}
++	input, err := os.Open(self)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer input.Close()
++	helper := filepath.Join(base, "v51-child")
++	output, err := os.OpenFile(helper, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0555)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := io.Copy(output, input); err != nil {
++		t.Fatal(err)
++	}
++	if err := output.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(helper, 0555); err != nil {
++		t.Fatal(err)
++	}
++	socket := filepath.Join(base, "v51.sock")
++	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	if err := v50ArmPasscredBeforeAccept(listener); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(socket, 0, int(uid)); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(socket, 0660); err != nil {
++		t.Fatal(err)
++	}
++	cmd := exec.Command(helper, "-test.run=^TestC1V51RRequiresScopeBeforeClaim$")
++	cmd.Env = append(os.Environ(), "VIRKI_V51_TEST_CHILD=sender", "VIRKI_V51_SOURCE="+source, "VIRKI_V51_SOCKET="+socket)
++	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: uid, Groups: []uint32{}}}
++	if err := cmd.Start(); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if cmd.ProcessState == nil {
++			_ = cmd.Process.Kill()
++			_ = cmd.Wait()
++		}
++	})
++	if err := listener.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	conn, err := listener.AcceptUnix()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	record := localcontext.Consumption{
++		Name: "source", WorkerID: manifest.WorkerID, SessionID: manifest.SessionID,
++		VertexDigest: "sha256:" + strings.Repeat("c", 64),
++		SnapshotID:   "snap-v51", VertexOutputIndex: 0,
++	}
++	dest := filepath.Join(protected, "candidate-v51")
++	// A forged V3 worker identity must be refused BEFORE V40 spends the
++	// one-use V15 test permit and before V36 publishes anything.
++	hostileRecord := record
++	hostileRecord.WorkerID = "untrusted-worker"
++	if err := PublishV51DevContextToV3(ctx, manager, ledger, conn, cmd.Process.Pid, uid, uid,
++		dest, manifest, permit, pub, 7, 8, hostileRecord); err == nil ||
++		!strings.Contains(err.Error(), "differs from frozen") {
++		t.Fatalf("V51 must refuse hostile worker before durable permit use: %v", err)
++	}
++	claims, err := os.ReadFile(filepath.Join(ledger, v40LogName))
++	if err != nil || len(claims) != 0 {
++		t.Fatalf("hostile V51 worker burned a V40 permit: len=%d err=%v", len(claims), err)
++	}
++	if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("hostile V51 worker published without authority: %v", err)
++	}
++	if err := PublishV51DevContextToV3(context.Background(), manager, ledger, conn, cmd.Process.Pid, uid, uid,
++        dest, manifest, permit, pub, 7, 8, record); err == nil || !strings.Contains(err.Error(), "no authorized solve scope") {
++        t.Fatalf("expected unauthorized V3 context refusal, got %v", err)
++    }
++    if err := cmd.Wait(); err != nil { t.Fatal(err) }
++    // Security acceptance: an unscoped V3 context must be rejected BEFORE a one-use V40 claim and root publication.
++    claims, err = os.ReadFile(filepath.Join(ledger, v40LogName))
++    if err != nil { t.Fatal(err) }
++    if len(claims) != 0 { t.Errorf("P2: V40 one-time permit irreversibly consumed without any authorized V3 context: %d ledger bytes", len(claims)) }
++    if _, err := os.Stat(dest); err == nil { t.Errorf("P2: root-owned destination was published before V3 authorization was checked") } else if !errors.Is(err, os.ErrNotExist) { t.Fatal(err) }
++    _ = scope
++    _ = expectedStream
++}
+diff --git a/util/localcontext/dev_v51_preflight_linux.go b/util/localcontext/dev_v51_preflight_linux.go
+new file mode 100644
+index 0000000..ef06fb5
+--- /dev/null
++++ b/util/localcontext/dev_v51_preflight_linux.go
+@@ -0,0 +1,70 @@
++//go:build linux && virki_c1c4_dev
++
++package localcontext
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"time"
++)
++
++// DevV51Preflight is a side-effect-free gate for the DEV V51 root publisher.
++// Unlike ContextConsumed, it never permits absent scope for an optional
++// Manager. All checks happen BEFORE the caller spends its durable V40 permit.
++// Only BeginSolve may create the private scope; this does not sign C4 evidence.
++//
++// A concurrent abort/expiry can still invalidate the scope after this return:
++// ContextConsumed MUST independently recheck after the protected copy.
++func (m *Manager) DevV51Preflight(ctx context.Context, manifestNonce string, record Consumption) error {
++	if m == nil || !m.required || m.service == nil {
++		return errors.New("V51R DEV protected publication requires a mandatory owner-scoped Manager")
++	}
++	if ctx == nil {
++		return errors.New("V51R DEV protected publication has no authorized solve context")
++	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	scope, ok := ctx.Value(scopeKey{}).(*SolveScope)
++	if !ok || scope == nil || scope.manager != m {
++		return errors.New("V51R DEV protected publication has no authorized solve scope on this Manager")
++	}
++	scope.mu.Lock()
++	defer scope.mu.Unlock()
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	if scope.closed || scope.completionAttempted || scope.abortRequested ||
++		!time.Now().Before(scope.auth.ExpiresAt) {
++		return errors.New("V51R DEV protected publication has expired or terminating owner scope")
++	}
++	if manifestNonce == "" || manifestNonce != scope.auth.Generation ||
++		manifestNonce != scope.binding.Nonce ||
++		(record.Generation != "" && record.Generation != manifestNonce) {
++		return errors.New("V51R DEV protected publication generation differs from approved owner scope")
++	}
++	if !isRequiredContext(record.Name) || record.WorkerID != scope.auth.WorkerID ||
++		!validIdentifier(record.SessionID) {
++		return errors.New("V51R DEV protected publication context, worker or session is not owner approved")
++	}
++	if _, exists := scope.records[record.Name]; exists {
++		return fmt.Errorf("V51R DEV duplicate local context %q before durable claim", record.Name)
++	}
++	if len(scope.auth.ContextSessionIDsV8) != len(requiredContexts) ||
++		scope.auth.ContextSessionIDsV8[record.Name] != record.SessionID ||
++		!validIdentifier(scope.auth.ContextIdentities[record.Name]) ||
++		!sha256Pattern.MatchString(scope.auth.ContextTreeDigests[record.Name]) {
++		return errors.New("V51R DEV owner scope lacks exact session and tree binding")
++	}
++	if record.ContextIdentity != "" && record.ContextIdentity != scope.auth.ContextIdentities[record.Name] ||
++		record.TreeDigestSchema != "" && record.TreeDigestSchema != scope.auth.ContextTreeDigestSchema ||
++		record.TreeDigest != "" && record.TreeDigest != scope.auth.ContextTreeDigests[record.Name] {
++		return errors.New("V51R DEV caller-provided context identity or tree differs from owner scope")
++	}
++	if !sha256Pattern.MatchString(record.VertexDigest) ||
++		!validIdentifier(record.SnapshotID) || record.VertexOutputIndex < 0 {
++		return errors.New("V51R DEV solver source metadata is incomplete before durable claim")
++	}
++	return nil
++}
+diff --git a/util/localcontext/dev_v51_preflight_linux_test.go b/util/localcontext/dev_v51_preflight_linux_test.go
+new file mode 100644
+index 0000000..1460c03
+--- /dev/null
++++ b/util/localcontext/dev_v51_preflight_linux_test.go
+@@ -0,0 +1,117 @@
++//go:build linux && virki_c1c4_dev
++
++package localcontext
++
++import (
++	"context"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestDevV51PreflightAuthorizesWithoutConsumingScope(t *testing.T) {
++	service := &v8OwnerSessionFixture{sessions: v8SessionPins()}
++	manager, err := NewManager(service, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, scope, err := manager.BeginSolve(context.Background(), testBinding())
++	if err != nil {
++		t.Fatal(err)
++	}
++	record := testConsumption("source")
++	for i := 0; i < 2; i++ {
++		if err := manager.DevV51Preflight(ctx, testNonce, record); err != nil {
++			t.Fatalf("valid V3-scoped DEV preflight #%d refused: %v", i, err)
++		}
++	}
++	if len(scope.records) != 0 || scope.completionAttempted || scope.abortRequested ||
++		service.completeCalls != 0 || service.abortCalls != 0 || service.beginCalls != 1 {
++		t.Fatal("DEV preflight mutated owner scope or invoked owner service")
++	}
++	if err := manager.ContextConsumed(ctx, record); err != nil {
++		t.Fatalf("real later admission must remain available: %v", err)
++	}
++	if err := manager.DevV51Preflight(ctx, testNonce, record); err == nil ||
++		!strings.Contains(err.Error(), "duplicate") {
++		t.Fatalf("duplicate V3 context could burn another permit: %v", err)
++	}
++}
++
++func TestDevV51PreflightRefusesUnboundOrTerminatingScopesWithoutSideEffects(t *testing.T) {
++	tests := []struct {
++		name   string
++		mutate func(*Manager, *SolveScope, *Consumption, *context.Context, *string)
++	}{
++		{"missing scope", func(_ *Manager, _ *SolveScope, _ *Consumption, ctx *context.Context, _ *string) {
++			*ctx = context.Background()
++		}},
++		{"optional Manager", func(m *Manager, _ *SolveScope, _ *Consumption, _ *context.Context, _ *string) {
++			m.required = false
++		}},
++		{"wrong scope manager", func(m *Manager, scope *SolveScope, _ *Consumption, _ *context.Context, _ *string) {
++			scope.manager = &Manager{required: true}
++		}},
++		{"wrong frozen nonce", func(_ *Manager, _ *SolveScope, _ *Consumption, _ *context.Context, nonce *string) {
++			*nonce = strings.Repeat("f", 32)
++		}},
++		{"record generation mismatch", func(_ *Manager, _ *SolveScope, r *Consumption, _ *context.Context, _ *string) {
++			r.Generation = strings.Repeat("e", 32)
++		}},
++		{"wrong worker", func(_ *Manager, _ *SolveScope, r *Consumption, _ *context.Context, _ *string) {
++			r.WorkerID = "another-worker"
++		}},
++		{"wrong required context", func(_ *Manager, _ *SolveScope, r *Consumption, _ *context.Context, _ *string) {
++			r.Name = "not-approved"
++		}},
++		{"wrong session", func(_ *Manager, _ *SolveScope, r *Consumption, _ *context.Context, _ *string) {
++			r.SessionID = "session-other"
++		}},
++		{"wrong tree", func(_ *Manager, _ *SolveScope, r *Consumption, _ *context.Context, _ *string) {
++			r.TreeDigest = "sha256:" + strings.Repeat("f", 64)
++		}},
++		{"wrong context identity", func(_ *Manager, _ *SolveScope, r *Consumption, _ *context.Context, _ *string) {
++			r.ContextIdentity = "forged-identity"
++		}},
++		{"invalid vertex", func(_ *Manager, _ *SolveScope, r *Consumption, _ *context.Context, _ *string) {
++			r.VertexDigest = "not-a-vertex"
++		}},
++		{"invalid snapshot", func(_ *Manager, _ *SolveScope, r *Consumption, _ *context.Context, _ *string) {
++			r.SnapshotID = ""
++		}},
++		{"expired", func(_ *Manager, scope *SolveScope, _ *Consumption, _ *context.Context, _ *string) {
++			scope.auth.ExpiresAt = time.Now().Add(-time.Second)
++		}},
++		{"closing", func(_ *Manager, scope *SolveScope, _ *Consumption, _ *context.Context, _ *string) {
++			scope.completionAttempted = true
++		}},
++		{"aborting", func(_ *Manager, scope *SolveScope, _ *Consumption, _ *context.Context, _ *string) {
++			scope.abortRequested = true
++		}},
++		{"no owner-pinned session", func(_ *Manager, scope *SolveScope, _ *Consumption, _ *context.Context, _ *string) {
++			scope.auth.ContextSessionIDsV8 = nil
++		}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			service := &v8OwnerSessionFixture{sessions: v8SessionPins()}
++			manager, err := NewManager(service, true)
++			if err != nil {
++				t.Fatal(err)
++			}
++			ctx, scope, err := manager.BeginSolve(context.Background(), testBinding())
++			if err != nil {
++				t.Fatal(err)
++			}
++			record, nonce := testConsumption("source"), testNonce
++			tc.mutate(manager, scope, &record, &ctx, &nonce)
++			if err := manager.DevV51Preflight(ctx, nonce, record); err == nil {
++				t.Fatal("unbound/terminating DEV scope passed preclaim authorization")
++			}
++			if len(scope.records) != 0 || service.completeCalls != 0 ||
++				service.abortCalls != 0 || service.beginCalls != 1 {
++				t.Fatal("failed preflight mutated scope or invoked owner service")
++			}
++		})
++	}
++}

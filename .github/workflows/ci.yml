@@ -208,19 +208,31 @@ jobs:
           git -C "$scratch" apply --cached "$bridge"
           test "$(git -C "$scratch" write-tree)" = b0b1507f6edd67f232728046263dda4fe8f4529e
           git -C "$scratch" checkout-index -f --all
-          # The V51 test uses the REAL V50 AF_UNIX FD, durable V40 claim,
+          # V51R is strictly post-V51: independently pin its patch bytes and
+          # resulting tree WITHOUT altering the 28 historic patches/V51 tree.
+          v51r="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v51-to-v51r-preclaim-dev.patch"
+          echo "86825e203a417970a2895c54201e28d18498ab53613d4abb07e90a377c3c15ce  $v51r" | sha256sum --check
+          git -C "$scratch" apply --cached --check "$v51r"
+          git -C "$scratch" apply --cached "$v51r"
+          test "$(git -C "$scratch" write-tree)" = bbf1938fe2ab81f7d1ca96d52d0e382bb5154dc9
+          git -C "$scratch" checkout-index -f --all
+          # The V51/V51R tests use the REAL V50 AF_UNIX FD, durable V40 claim,
           # root-owned V36 publication and V3 Manager, but DOES NOT sign or
           # complete a C4 owner release. The build-tag gate is DEV-only.
           sudo env -i PATH=/usr/bin:/bin HOME=/root GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
             VIRKI_V51_RUN_ROOT_FIXTURE=1 "$toolchain/go/bin/go" test -mod=vendor \
             -tags virki_c1c4_dev -race -count=1 -timeout 180s -v ./session/filesync \
-            -run '^TestC1V51RealProtectedPublisherFeedsV3Manager$' \
+            -run '^TestC1V51(RealProtectedPublisherFeedsV3Manager|RRequiresScopeBeforeClaim|RRefusesOptionalManagerWithoutScope)$' \
             | tee "$RUNNER_TEMP/issue90-v51-physical-bridge.log"
           ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v51-physical-bridge.log"
+          "$toolchain/go/bin/go" test -mod=vendor -tags virki_c1c4_dev -race -count=1 \
+            -timeout 180s -v ./util/localcontext -run '^TestDevV51Preflight' \
+            | tee "$RUNNER_TEMP/issue90-v51r-manager-preclaim.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v51r-manager-preclaim.log"
           # Source/local and llbsolver still contain upstream go vet
           # lostcancel diagnostics at their original V50 tree; V51 must not
           # rewrite unrelated upstream lifetime semantics to mask that debt.
-          "$toolchain/go/bin/go" vet -mod=vendor ./session/filesync ./util/localcontext ./cmd/buildkitd/config ./cmd/buildkitd
+          "$toolchain/go/bin/go" vet -mod=vendor -tags virki_c1c4_dev ./session/filesync ./util/localcontext ./cmd/buildkitd/config ./cmd/buildkitd
           VIRKI_C4_TEST_SOURCE_DIR="$GITHUB_WORKSPACE/infra/offline/native-owner-authority" \
             "$toolchain/go/bin/go" test -mod=vendor -race -count=1 -timeout 180s \
             -v ./util/localcontext -run '^TestVROAV3ServiceWithRealManagerAndNativeDaemon$' \
