@@ -25,3 +25,4 @@ d3b8743900bac1de7a1f28fecd5927d0d4df6117b134d987613abc8d7003baed  docs/security/
 c411f76f15e0a73871030b264280cbb641e54f3faa829010c89957a26ab88465  docs/security/experiments/buildkit-v0.34.1-c1-v47-recovery-observer-no-xdev-dev-only.patch
 a9497fd6f51c0597f87fb3a4ab8f33cfe1b2fc471033b98cab486a872e64cfc6  docs/security/experiments/buildkit-v0.34.1-c1-v48-final-fence-fsync-recovery-dev-only.patch
 830f1b9d6dc433e1001ea9b5174f52590877e3b210b06cda01a2ad27c88550d4  docs/security/experiments/buildkit-v0.34.1-c1-v49-authenticated-sender-credentials-dev-only.patch
+6b1624f613aeb94313572a163882310483fa34e16be6c4919a67f945f719f3ae  docs/security/experiments/buildkit-v0.34.1-c1-v50-early-passcred-listener-dev-only.patch

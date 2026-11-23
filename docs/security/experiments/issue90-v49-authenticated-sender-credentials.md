@@ -43,6 +43,14 @@ Validation on WSL2 Linux with Go 1.26.10: V37/V39/V49 targeted tests passed
 both ordinarily and with `-race`, no skipped tests; `go vet`
 passed. The immutable V23–V49 SHA/tree replay passed.
 
+**Cross-kernel follow-up (V50):** V49 originally enabled `SO_PASSCRED`
+inside the receiver, which was too late for a message already queued by the
+sender on native Ubuntu. The first V49 GitHub CI correctly failed the existing
+positive V37/V39 tests. V50 adds a listener-before-accept precondition and
+retains the actual per-message sender check. See
+`issue90-v50-early-passcred-listener.md`; the V49 patch and its
+historical SHA/tree remain unchanged.
+
 ## Trust boundary
 
 V49 is synthetic, deliberately **unwired** to production FileSync. Neither

@@ -189,6 +189,20 @@ Actual Linux production custody, pidfd lifecycle authority, C4 real owner
 signatures and independent anti-rollback witness remain unproven and are not
 conflated with this DEV proof.
 
+**V50 Ubuntu CI positive-handoff repair (DEV-only):** The first hosted CI
+run for published V49 `b02e797` reproduced a false refusal on a legitimate
+Unix peer: enabling `SO_PASSCRED` inside the receiver after the client
+had already queued the message omitted the necessary kernel sender-credential
+record on native Ubuntu. The V37/V39 existing positive cases failed; the
+V49 inherited-socket deny cases continued to pass. A V50 regression asserted
+the accepted socket's actual passcred option **before** the receiver ran and
+reproduced RED (`SO_PASSCRED=0`) on WSL. V50 adds a protected-listener
+setup helper and an accepted-socket precondition, while maintaining strict
+`SCM_CREDENTIALS` and `SCM_RIGHTS` authentication and preserving
+all previous negative tests. This is a **new V50 patch**; previous V23–V49
+patches, hashes and tree checkpoints remain unchanged. See
+`docs/security/experiments/issue90-v50-early-passcred-listener.md`.
+
 ## Fourth PR after merges
 
 ### Incremental DEV-only V42 evidence (PR #141)
