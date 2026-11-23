@@ -49,6 +49,21 @@ inode, fsyncs it, atomically renames it over the fixed marker pathname, and
 fsyncs the parent. This avoids check-then-reopen on the attacked name while
 preserving fail-closed behavior. The new fixture is GREEN after correction.
 
+The same ambiguity also existed in **initial genesis state creation**: an
+injected `EIO` at its first parent-directory fsync returned failure while an
+otherwise valid genesis JSON was already readable and accepted subsequent
+`PREPARED` transitions without a reconciliation fence. Its disposable PoC
+printed `fired=true, error=GENESIS_FINAL_PARENT_FSYNC_EIO, loaded=true,
+appended=true, pending=false`. Two new automated Linux tests reproduced RED
+(7/9 passed) for first and final parent syncs. `initAnchoredAuthState` now
+exclusively reserves an initially empty state file, durably creates the same
+`.pending` intent **before writing any valid JSON**, and completes the intent
+using the same shared atomic recovery routine as later transitions. If a crash
+occurs before that marker exists, the reserved file is still empty and cannot
+pass the canonical JSON verifier; a second initializer still cannot overwrite
+an already valid state. Linux focused fault injection and integration suite
+finished GREEN (18/18, zero SKIPs) including real native C4 deny-by-default.
+
 `c1-c4-fsync-fault.test.mjs` covers real `fsyncSync` fault injection after
 rename, after final marker removal, abrupt process exit with intent persisted,
 refusal of dangling/substituted intent markers, and ordinary successful

@@ -364,14 +364,11 @@ function writeAllSync(fd, buf) {
   }
 }
 
-function writeAtomicState(filePath, nextState) {
-  // A successful rename is not necessarily a durable commit until its parent
-  // directory fsync succeeds. Previously an EIO at that final fsync returned
-  // an error yet allowed a different authorization transition on restart.
-  // Persist an independent fail-closed intent BEFORE touching the state. A
-  // crash or ambiguous fsync keeps the marker and requires manual reconciliation.
+function createPendingAuthIntent(filePath, flags) {
+  // Both the initial state and every later transition require a durable
+  // intention marker before valid authorization state bytes are published.
+  // This deliberately cannot authorize or auto-reconcile a pending transition.
   const pendingPath = `${filePath}.pending`;
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
   const pendingFd = openSync(pendingPath, flags, 0o600);
   try {
     fsyncSync(pendingFd);
@@ -379,34 +376,19 @@ function writeAtomicState(filePath, nextState) {
     closeSync(pendingFd);
   }
   fsyncParentDir(filePath);
+  return pendingPath;
+}
 
-  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-  const fd = openSync(tmpPath, flags, 0o600);
-  try {
-    const data = canonicalJsonBytes(nextState);
-    writeAllSync(fd, data);
-    fsyncSync(fd);
-  } catch (err) {
-    closeSync(fd);
-    try { unlinkSync(tmpPath); } catch (_cleanupErr) { void _cleanupErr; }
-    throw err;
-  }
-  closeSync(fd);
-  renameSync(tmpPath, filePath);
-  fsyncParentDir(filePath);
+function completePendingAuthIntent(filePath, pendingPath, flags) {
+  // The state has been fsynced and its parent synchronized, but the commit is
+  // not acknowledged until the pending intent is durably removed.
   unlinkSync(pendingPath);
   try {
     fsyncParentDir(filePath);
   } catch (error) {
-    // An unlink followed by an ambiguous directory fsync may already have
-    // removed the only crash-recovery fence. Restore and sync it before
-    // allowing any new transaction to inspect this state. If the filesystem
-    // cannot persist this marker, fail rather than manufacture durability.
+    // A failed final parent fsync is an ambiguous commit. Recreate the
+    // fail-closed fence with an independent exclusive inode and atomic rename.
     try {
-      // Do not check-and-reopen the previously removed pending pathname:
-      // another same-UID writer could replace it between those operations.
-      // Restore from a fresh exclusive inode, then atomically replace whatever
-      // occupies the fixed name (including a dangling symlink) with rename.
       const restoreTmp = `${pendingPath}.restore.${randomBytes(12).toString("hex")}`;
       const restoreFd = openSync(restoreTmp, flags, 0o600);
       try {
@@ -422,6 +404,27 @@ function writeAtomicState(filePath, nextState) {
     }
     throw error;
   }
+}
+
+function writeAtomicState(filePath, nextState) {
+  // A successful rename is not necessarily durable until the parent fsync.
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+  const pendingPath = createPendingAuthIntent(filePath, flags);
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  const fd = openSync(tmpPath, flags, 0o600);
+  try {
+    const data = canonicalJsonBytes(nextState);
+    writeAllSync(fd, data);
+    fsyncSync(fd);
+  } catch (err) {
+    closeSync(fd);
+    try { unlinkSync(tmpPath); } catch (_cleanupErr) { void _cleanupErr; }
+    throw err;
+  }
+  closeSync(fd);
+  renameSync(tmpPath, filePath);
+  fsyncParentDir(filePath);
+  completePendingAuthIntent(filePath, pendingPath, flags);
 }
 
 function assertNoAmbiguousStateTransition(filePath) {
@@ -485,8 +488,14 @@ export function initAnchoredAuthState(filePath, anchorSha) {
     entries: [],
   };
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+  // Reserve the initial path exclusively before creating the marker. If the
+  // process crashes in this small window, the file is still empty and cannot
+  // be mistaken for initialized, verified state. A second initializer cannot
+  // overwrite a valid existing state or poison it with a fresh pending marker.
   const fd = openSync(filePath, flags, 0o600);
+  let pendingPath;
   try {
+    pendingPath = createPendingAuthIntent(filePath, flags);
     const data = canonicalJsonBytes(initial);
     writeAllSync(fd, data);
     fsyncSync(fd);
@@ -494,6 +503,7 @@ export function initAnchoredAuthState(filePath, anchorSha) {
     closeSync(fd);
   }
   fsyncParentDir(filePath);
+  completePendingAuthIntent(filePath, pendingPath, flags);
   return initial;
 }
 

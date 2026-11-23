@@ -61,6 +61,54 @@ function assertAmbiguityFenced(file) {
     "a different valid DEV authorization must not be accepted after ambiguous fsync");
 }
 
+function failGenesisSyncWhen(t, condition) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1-c4-genesis-fsync-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "state.json");
+  const original = fs.fsyncSync;
+  let injected = false;
+  fs.fsyncSync = (fd) => {
+    let ready = false;
+    if (!injected && fs.fstatSync(fd).isDirectory() && fs.existsSync(file)) {
+      try { ready = JSON.parse(fs.readFileSync(file, "utf8")).sequenceFloor === 0; }
+      catch { /* An unfinished empty reservation is not yet an auth state. */ }
+    }
+    if (ready && condition(file)) {
+      injected = true;
+      const error = new Error("SYNTHETIC_GENESIS_PARENT_FSYNC_EIO");
+      error.code = "EIO";
+      throw error;
+    }
+    return original(fd);
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => initAnchoredAuthState(file, "a".repeat(40)),
+      /SYNTHETIC_GENESIS_PARENT_FSYNC_EIO/u);
+  } finally {
+    fs.fsyncSync = original;
+    syncBuiltinESMExports();
+  }
+  assert.equal(injected, true, "genesis fault must follow a complete but not durably committed initial state");
+  assert.equal(fs.existsSync(file), true, "the initial file was created before the injected sync failure");
+  assertAmbiguityFenced(file);
+}
+
+test("C1->C4 DEV genesis parent fsync EIO leaves a durable intent and refuses future reads/writes", {
+  skip: process.platform !== "linux",
+}, (t) => failGenesisSyncWhen(t, () => true));
+
+test("C1->C4 DEV genesis post-unlink fsync EIO reinstates the recovery marker", {
+  skip: process.platform !== "linux",
+}, (t) => failGenesisSyncWhen(t, (file) => !fs.existsSync(`${file}.pending`)));
+
+test("C1->C4 DEV initialization never overwrites an already initialized state", (t) => {
+  const file = fixture(t);
+  assert.throws(() => initAnchoredAuthState(file, "c".repeat(40)), { code: "EEXIST" });
+  assert.equal(loadAndVerifyAuthState(file).anchorSha, "a".repeat(40));
+  assert.equal(fs.existsSync(`${file}.pending`), false);
+});
+
 test("C1->C4 DEV state refuses later transitions after post-rename directory fsync EIO", {
   skip: process.platform !== "linux",
 }, (t) => {
