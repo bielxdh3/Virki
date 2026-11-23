@@ -306,6 +306,13 @@ jobs:
           git -C "$scratch" apply --cached --check "$addon"
           git -C "$scratch" apply --cached "$addon"
           test "$(git -C "$scratch" write-tree)" = 056ddc9815176e137117281e2d360a9c10048296
+          # Exercise the actual BuildKit C1 physical stream producer with the
+          # isolated native C4 daemon in both DEV candidate and release-denied modes.
+          physical="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-c4-physical-stream-dev.patch"
+          echo "9f16059ae03bac7d7345602c2a34e04ec151740433b3fe0f90cd86af50c001a6  $physical" | sha256sum --check
+          git -C "$scratch" apply --cached --check "$physical"
+          git -C "$scratch" apply --cached "$physical"
+          test "$(git -C "$scratch" write-tree)" = 8fa0196e163da1c0f40a2034a3d968ec5e1c469b
           git -C "$scratch" checkout-index --all
           export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
           export VIRKI_C4_TEST_SOURCE_DIR="$GITHUB_WORKSPACE/infra/offline/native-owner-authority"
