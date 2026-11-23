@@ -52,6 +52,33 @@ function assertHeaders(response, status) {
   return nonce;
 }
 
+function inspectCriticalStyles(page) {
+  return page.evaluate(() => {
+    const authPage = document.querySelector('main.auth-page');
+    return {
+      links: [...document.querySelectorAll('link[rel="stylesheet"]')].map((link) => ({
+        href: link.href,
+        // Accessing cssRules is not permitted for crossorigin stylesheets,
+        // even when they loaded and apply successfully.
+        loaded: !!link.sheet
+      })),
+      authPageDisplay: authPage ? getComputedStyle(authPage).display : null
+    };
+  });
+}
+
+function assertCriticalStyles(path, styles, responses) {
+  assert.ok(styles.links.length > 0, `${path}: missing critical stylesheet links`);
+  for (const link of styles.links) {
+    assert.ok(link.loaded,
+      `${path}: critical stylesheet failed to load (${link.href})`);
+    assert.ok(responses.some((response) =>
+      response.url === link.href && response.status === 200 && /^text\/css(?:\s*;|$)/iu.test(response.contentType)),
+      `${path}: critical stylesheet lacked a successful HTTP 200 text/css response (${link.href})`);
+  }
+  assert.equal(styles.authPageDisplay, 'grid', `${path}: .auth-page layout CSS was not applied`);
+}
+
 test('Hub production 200/404 use nonce-bearing Next scripts and CSP-compatible 404 styles in a real HTML5 browser', { timeout: 90000 }, async () => {
   const port = await reservePort();
   const node = spawn(process.execPath, [join(root, 'node_modules/next/dist/bin/next'), 'start',
@@ -118,16 +145,36 @@ test('Hub production 200/404 use nonce-bearing Next scripts and CSP-compatible 4
     browser = await chromium.launch({ headless: true,
       ...(process.env.VIRKI_ISSUE119_BROWSER_CHANNEL
         ? { channel: process.env.VIRKI_ISSUE119_BROWSER_CHANNEL } : {}) });
-    const page = await browser.newPage();
     const pageErrors = [];
-    page.on('pageerror', (error) => pageErrors.push(error.message));
-    await page.addInitScript(() => {
-      window.__issue119Violations = [];
-      document.addEventListener('securitypolicyviolation', (event) =>
-        window.__issue119Violations.push(event.effectiveDirective));
-    });
+    let abortedStylesheets = 0;
     const snapshots = [];
     for (const [path, expectedStatus] of [['/login', 200], ['/missing-issue119', 404]]) {
+      // Fresh browser contexts avoid treating CSS cached by the 200 page as
+      // evidence that the 404 fetched and applied its own stylesheet.
+      const page = await browser.newPage();
+      const stylesheetResponses = [];
+      page.on('pageerror', (error) => pageErrors.push(error.message));
+      page.on('response', (response) => {
+        if (response.request().resourceType() === 'stylesheet') {
+          stylesheetResponses.push({
+            url: response.url(), status: response.status(),
+            contentType: response.headers()['content-type'] ?? ''
+          });
+        }
+      });
+      // Fault injection deliberately exercises the SAME production assertions
+      // below. Setting the flag must fail the gate, not skip any checks.
+      if (process.env.VIRKI_ISSUE119_TEST_ABORT_CSS === 'true') {
+        await page.route(/\.css(?:\?|$)/u, (route) => {
+          abortedStylesheets++;
+          return route.abort();
+        });
+      }
+      await page.addInitScript(() => {
+        window.__issue119Violations = [];
+        document.addEventListener('securitypolicyviolation', (event) =>
+          window.__issue119Violations.push(event.effectiveDirective));
+      });
       const documentResponse = await page.goto(`http://127.0.0.1:${proxyPort}${path}`,
         { waitUntil: 'networkidle' });
       assert.equal(documentResponse?.status(), expectedStatus, `${path} browser status`);
@@ -144,20 +191,47 @@ test('Hub production 200/404 use nonce-bearing Next scripts and CSP-compatible 4
         hasNext: !!window.next
       }));
       assert.ok(inspected.scripts.some((script) => script.inline), `${path}: missing hydration bootstrap`);
-      snapshots.push({ path, inspected, nonce });
+      snapshots.push({ path, inspected, nonce, styles: await inspectCriticalStyles(page), stylesheetResponses });
+      await page.close();
     }
 
-    for (const { path, inspected, nonce } of snapshots) {
+    if (process.env.VIRKI_ISSUE119_TEST_ABORT_CSS === 'true') {
+      assert.ok(abortedStylesheets > 0, 'negative control must abort a real CSS request');
+    }
+    for (const { path, inspected, nonce, styles, stylesheetResponses } of snapshots) {
       assert.ok(inspected.scripts.every((script) => script.nonce === nonce),
         `${path}: real HTML5 parser found executable scripts missing the response CSP nonce`);
       assert.equal(inspected.violations.length, 0,
         `${path}: browser enforced CSP rejected resource or inline code`);
       assert.equal(inspected.hasNext, true, `${path}: Next runtime did not execute`);
+      assertCriticalStyles(path, styles, stylesheetResponses);
     }
     assert.ok(snapshots[1].inspected.styleTagNonces.every((nonce) => nonce === snapshots[1].nonce),
       '404 rendered an inline stylesheet without the request CSP nonce');
     assert.match(snapshots[1].inspected.heading, /404/u);
     assert.deepEqual(pageErrors, []);
+
+    if (process.env.VIRKI_ISSUE119_TEST_ABORT_CSS !== 'true') {
+      // Every CI run exercises a negative control as well as the ordinary
+      // positive gate. A browser that loses its CSS must not satisfy it.
+      const negativePage = await browser.newPage();
+      let blockedCssCount = 0;
+      await negativePage.route(/\.css(?:\?|$)/u, (route) => {
+        blockedCssCount++;
+        return route.abort();
+      });
+      const negativeResponse = await negativePage.goto(
+        `http://127.0.0.1:${proxyPort}/missing-issue119`, { waitUntil: 'networkidle' });
+      assert.equal(negativeResponse?.status(), 404);
+      assert.ok(blockedCssCount > 0, 'negative control did not intercept an actual CSS request');
+      const negativeStyles = await inspectCriticalStyles(negativePage);
+      assert.throws(
+        () => assertCriticalStyles('/missing-issue119 (CSS intentionally blocked)', negativeStyles, []),
+        /critical stylesheet (?:failed to load|lacked a successful HTTP 200 text\/css response)/u,
+        'negative control: absent CSS must fail the production stylesheet gate'
+      );
+      await negativePage.close();
+    }
   } finally {
     await browser?.close();
     if (proxy) await new Promise((resolveClose) => proxy.close(resolveClose));
