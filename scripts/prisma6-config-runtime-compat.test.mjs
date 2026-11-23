@@ -23,10 +23,16 @@ function withPrismaConfig(t, contents) {
 test("vendored Prisma6 actually loads a c12 config with safe deepmerge-ts 8", async (t) => {
   const root = withPrismaConfig(t, 'module.exports = { schema: "./schema.prisma", migrations: { path: "./migrations" }, typedSql: { path: "./queries" }, views: { path: "./views" } };');
   const configFile = path.join(root, "prisma.config.cjs");
+  let mergerInvocations = 0;
   const fromC12 = await loadC12({
     cwd: root, name: "prisma", configFile, dotenv: false, rcFile: false,
-    giget: false, extend: false, packageJson: false, merger: deepmerge
+    giget: false, extend: false, packageJson: false,
+    merger: (...values) => {
+      mergerInvocations += 1;
+      return deepmerge(...values);
+    }
   });
+  assert.ok(mergerInvocations > 0, "c12 must actually invoke the upgraded deepmerge API, not only accept its option");
   assert.equal(fromC12.config?.schema, "./schema.prisma", "c12 must resolve its config using the upgraded merger");
   const loaded = await loadConfigFromFile({ configRoot: root, configFile });
   assert.equal(loaded.error, undefined, JSON.stringify(loaded.error));
