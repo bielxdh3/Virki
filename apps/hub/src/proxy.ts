@@ -4,7 +4,7 @@ import { validateCloudflareAccessJwt } from "@virki/auth/cloudflare-access";
 import { isNativeHubPerimeterEnabled } from "./lib/hub-perimeter";
 import { writeHubAccessDenialAudit } from "./lib/access-denial-audit";
 import { createHubRenderProof, HUB_RENDER_PROVENANCE_HEADER, verifyHubRenderProof } from "./lib/hub-render-provenance";
-import { getSurface, getSurfaceBaseUrl, safeReturnTo, TRUSTED_REQUEST_PATH_HEADER } from "./lib/surface";
+import { getSurface, getSurfaceBaseUrl, hasSameOrigin, safeReturnTo, TRUSTED_REQUEST_PATH_HEADER } from "./lib/surface";
 
 const PROTECTED_CACHE_CONTROL = "private, no-store, max-age=0, must-revalidate";
 const PUBLIC_ROUTES = new Set([
@@ -137,6 +137,13 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
       }
       return withCsp(new NextResponse("Forbidden", { status: 403, headers }));
     }
+  }
+
+  // Next.js rejects cross-origin Server Actions after dispatch, but answers
+  // malformed recovery POSTs with HTTP 500. Reject at the ingress boundary
+  // while retaining the action's own scoped CSRF check for legitimate POSTs.
+  if (pathname === "/recover" && request.method === "POST" && !hasSameOrigin(request.headers)) {
+    return withCsp(new NextResponse("Forbidden", { status: 403, headers: { "Cache-Control": "no-store" } }));
   }
 
   if (isPublicPath(pathname, surface)) {

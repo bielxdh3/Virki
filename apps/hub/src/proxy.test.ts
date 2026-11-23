@@ -311,6 +311,35 @@ test("obsolete recovery API requires authentication while real recovery routes s
   assert.equal((await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/api/recover", { headers: { host: "portal.biel.dev.br" } }), env)).status, 307);
 });
 
+test("recovery POST rejects hostile Origin before Next Server Actions can return HTTP 500", async () => {
+  const productionEnv = { ...env, NODE_ENV: "production" };
+  for (const origin of ["https://attacker.invalid", "null", "https://portal.biel.dev.br.attacker.invalid", undefined]) {
+    const headers = { host: "portal.biel.dev.br", "next-action": "untrusted-action", ...(origin ? { origin } : {}) };
+    const response = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/recover", {
+      method: "POST", headers
+    }), productionEnv);
+    assert.equal(response.status, 403, `recovery Origin ${origin ?? "missing"} must reject before framework dispatch`);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.match(response.headers.get("content-security-policy") ?? "", /'nonce-[^']+'/u);
+    assert.equal(response.headers.get("access-control-allow-origin"), null);
+  }
+
+  const sameOrigin = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/recover", {
+    method: "POST", headers: { host: "portal.biel.dev.br", origin: "https://portal.biel.dev.br" }
+  }), productionEnv);
+  assert.equal(sameOrigin.status, 200, "valid POST still reaches the existing scoped CSRF guard");
+
+  const externalGet = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/recover", {
+    headers: { host: "portal.biel.dev.br", origin: "https://attacker.invalid" }
+  }), productionEnv);
+  assert.equal(externalGet.status, 200, "GET remains readable for recovery pages");
+
+  const unknownHost = await evaluateProxyRequest(new NextRequest("https://unknown.invalid/recover", {
+    method: "POST", headers: { host: "unknown.invalid", origin: "https://attacker.invalid" }
+  }), productionEnv);
+  assert.equal(unknownHost.status, 404, "unrecognized hosts retain the existing 404 boundary");
+});
+
 test("sensitive public authentication responses carry no-store and server-generated correlation", async () => {
   for (const path of ["/login", "/login/verify", "/api/login", "/api/login/verify", "/api/passkeys", "/api/logout", "/recover", "/recover/open"]) {
     const response = await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: { host: "portal.biel.dev.br", "x-virki-audit-request-id": "spoof" } }), env);
