@@ -139,10 +139,12 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
     }
   }
 
-  // Next.js rejects cross-origin Server Actions after dispatch, but answers
-  // malformed recovery POSTs with HTTP 500. Reject at the ingress boundary
-  // while retaining the action's own scoped CSRF check for legitimate POSTs.
-  if (pathname === "/recover" && request.method === "POST" && !hasSameOrigin(request.headers)) {
+  // Reject malformed/cross-origin HTML POSTs before Next Server Actions can
+  // return HTTP 500. Recovery actions retain their scoped CSRF check after
+  // ingress; login-page forms submit through the separate /api/login routes.
+  if (request.method === "POST" &&
+      (pathname === "/recover" || pathname === "/login" || pathname === "/login/verify") &&
+      !hasSameOrigin(request.headers)) {
     return withCsp(new NextResponse("Forbidden", { status: 403, headers: { "Cache-Control": "no-store" } }));
   }
 

@@ -25,9 +25,9 @@ async function reservePort() {
   return port;
 }
 
-function request(port, path, extraHeaders = {}) {
+function request(port, path, extraHeaders = {}, options = {}) {
   return new Promise((resolveRequest, rejectRequest) => {
-    const req = httpRequest({ hostname: '127.0.0.1', port, path, method: 'GET',
+    const req = httpRequest({ hostname: '127.0.0.1', port, path, method: options.method ?? 'GET',
       headers: { host, accept: 'text/html', ...extraHeaders } }, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
@@ -36,7 +36,7 @@ function request(port, path, extraHeaders = {}) {
         headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
     });
     req.on('error', rejectRequest);
-    req.end();
+    req.end(options.body);
   });
 }
 
@@ -83,6 +83,22 @@ test('Hub production 200/404 use nonce-bearing Next scripts and CSP-compatible 4
     const notFoundNonce = assertHeaders(notFound, 404);
     assert.notEqual(loginNonce, notFoundNonce, 'CSP nonce was reused between responses');
     assert.doesNotMatch(notFound.body, /\sstyle=/iu, '404 server HTML embeds forbidden inline style attributes');
+
+    // A crafted Server Action POST with a hostile or missing Origin must be
+    // rejected at ingress, before Next responds with an application error.
+    // Neither page processes POST: their forms target /api/login/* routes.
+    for (const path of ['/login', '/login/verify']) {
+      for (const origin of [undefined, 'https://attacker.invalid']) {
+        const headers = { 'next-action': 'invalid-issue119-action',
+          'content-type': 'text/plain;charset=UTF-8' };
+        if (origin) headers.origin = origin;
+        const blocked = await request(port, path, headers, { method: 'POST', body: '[]' });
+        assert.equal(blocked.status, 403,
+          `${path}: Server Action POST must reject ${origin ?? 'missing Origin'} before Next dispatch`);
+        assert.equal(blocked.headers['x-powered-by'], undefined);
+        assert.match(blocked.headers['cache-control'] ?? '', /no-store/u);
+      }
+    }
 
     // A loopback-only HTTP forwarder preserves the canonical Host upstream, and
     // lets Chromium test production CSP without relying on real DNS or TLS.

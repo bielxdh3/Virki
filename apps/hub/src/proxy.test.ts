@@ -100,6 +100,26 @@ test("password-verified backup factor selection reaches the public route without
   assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0, must-revalidate");
 });
 
+test("login page POSTs reject absent and cross-origin Server Action requests before Next dispatch", async () => {
+  const native = { ...env, NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native" };
+  for (const host of ["hub.biel.dev.br", "portal.biel.dev.br"]) {
+    for (const path of ["/login", "/login/verify"]) {
+      for (const origin of [undefined, "https://attacker.invalid", "null"]) {
+        const headers = new Headers({ host, "next-action": "invalid-issue119-action", "content-type": "text/plain" });
+        if (origin) headers.set("origin", origin);
+        const denied = await evaluateProxyRequest(new NextRequest(`https://${host}${path}`, { method: "POST", headers, body: "[]" }), native);
+        assert.equal(denied.status, 403, `${host}${path} with ${origin ?? "missing origin"}`);
+        assert.equal(denied.headers.get("cache-control"), "no-store");
+        assert.match(denied.headers.get("content-security-policy") ?? "", /'nonce-[^']+'/u);
+      }
+      const allowed = await evaluateProxyRequest(new NextRequest(`https://${host}${path}`, {
+        method: "POST", headers: { host, origin: `https://${host}` }
+      }), native);
+      assert.equal(allowed.status, 200, `${host}${path} legitimate same-origin post must reach app`);
+    }
+  }
+});
+
 test("authenticated portal pages receive the no-store policy from the production Proxy boundary", async () => {
   const response = await evaluateProxyRequest(
     new NextRequest("https://portal.biel.dev.br/account/security", {
