@@ -507,7 +507,7 @@ export function initAnchoredAuthState(filePath, anchorSha) {
   return initial;
 }
 
-export function loadAndVerifyAuthState(filePath) {
+function readAndVerifyAuthStateWithoutLock(filePath) {
   assertNoAmbiguousStateTransition(filePath);
   const fd = openSync(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   let raw;
@@ -567,9 +567,17 @@ export function loadAndVerifyAuthState(filePath) {
   return state;
 }
 
+export function loadAndVerifyAuthState(filePath) {
+  // Readers must serialize with writers as well: checking the pending marker
+  // twice cannot rule out a complete atomic rename + intent clear between
+  // those two checks. A stale PREPARED snapshot could otherwise survive an
+  // independently committed ABORTED transition.
+  return withAuthStateLock(filePath, () => readAndVerifyAuthStateWithoutLock(filePath));
+}
+
 export function appendAuthStateTransition(filePath, { epoch, nonce, contractSha256, status }) {
   return withAuthStateLock(filePath, () => {
-    const state = loadAndVerifyAuthState(filePath);
+    const state = readAndVerifyAuthStateWithoutLock(filePath);
     demand(!state.faulted, "auth state is faulted; mutations fenced");
     demand(epoch === state.currentEpoch, "stale or future epoch");
     demand(status === "PREPARED" || status === "ABORTED", "only non-authorizing PREPARED/ABORTED transitions permitted");
@@ -600,7 +608,7 @@ export function appendAuthStateTransition(filePath, { epoch, nonce, contractSha2
 
 export function recoverAuthStateWithEpochFence(filePath) {
   return withAuthStateLock(filePath, () => {
-    const state = loadAndVerifyAuthState(filePath);
+    const state = readAndVerifyAuthStateWithoutLock(filePath);
     demand(!state.faulted, "faulted auth state cannot be recovered without operator reconciliation");
     const nextEpoch = state.currentEpoch + 1;
     const sequence = state.sequenceFloor + 1;
@@ -673,24 +681,26 @@ export function evaluateC1ToC4IntegrationCandidate({
   const contractDigestHex = computeBoundContractDigest({ contract, output, custody });
   verifyOwnerAuthorizationEnvelope({ contractDigestHex, approval, policy });
 
-  const state = loadAndVerifyAuthState(stateFilePath);
-  demand(!state.faulted, "auth state is faulted");
-  demand(contract.epoch === state.currentEpoch, "contract epoch does not match active state epoch");
-  demand(contract.sourceCommit === state.anchorSha, "contract sourceCommit does not match state anchorSha");
-  const hasPrepared = state.entries.some((e) => e.status === "PREPARED" && e.epoch === contract.epoch && e.nonce === contract.nonce && e.contractSha256 === contractDigestHex);
-  const isAborted = state.entries.some((e) => e.status === "ABORTED" && e.epoch === contract.epoch && e.nonce === contract.nonce);
-  demand(hasPrepared && !isAborted, "contract has no active PREPARED authorization scope");
+  return withAuthStateLock(stateFilePath, () => {
+    const state = readAndVerifyAuthStateWithoutLock(stateFilePath);
+    demand(!state.faulted, "auth state is faulted");
+    demand(contract.epoch === state.currentEpoch, "contract epoch does not match active state epoch");
+    demand(contract.sourceCommit === state.anchorSha, "contract sourceCommit does not match state anchorSha");
+    const hasPrepared = state.entries.some((e) => e.status === "PREPARED" && e.epoch === contract.epoch && e.nonce === contract.nonce && e.contractSha256 === contractDigestHex);
+    const isAborted = state.entries.some((e) => e.status === "ABORTED" && e.epoch === contract.epoch && e.nonce === contract.nonce);
+    demand(hasPrepared && !isAborted, "contract has no active PREPARED authorization scope");
 
-  verifyAntiRollbackWitness(state, witness);
-  return Object.freeze({
-    status: "DEFENSIVE_VERIFIED_NON_AUTHORIZING",
-    deployAuthorized: false,
-    workerReceiptPairAdmitted: false,
-    signAckStatus: SIGN_ACK_DENIED_STATUS,
-    contractSha256: contractDigestHex,
-    fileSyncManifestSha256: manifestSha,
-    epoch: state.currentEpoch,
-    sequenceFloor: state.sequenceFloor,
-    headEntrySha256: state.headEntrySha256,
+    verifyAntiRollbackWitness(state, witness);
+    return Object.freeze({
+      status: "DEFENSIVE_VERIFIED_NON_AUTHORIZING",
+      deployAuthorized: false,
+      workerReceiptPairAdmitted: false,
+      signAckStatus: SIGN_ACK_DENIED_STATUS,
+      contractSha256: contractDigestHex,
+      fileSyncManifestSha256: manifestSha,
+      epoch: state.currentEpoch,
+      sequenceFloor: state.sequenceFloor,
+      headEntrySha256: state.headEntrySha256,
+    });
   });
 }

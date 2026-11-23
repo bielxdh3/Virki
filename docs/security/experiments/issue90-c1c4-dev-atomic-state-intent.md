@@ -73,6 +73,31 @@ alongside the existing native daemon boundary suite. No SKIP, production
 authority, test-policy relaxation, merge, deploy, or patch-history rewrite is
 needed.
 
+## Concurrent reader / ABORT race (additional RED→GREEN)
+
+A second independent Linux process can commit an `ABORTED` transition between
+the reader's snapshot of the previous JSON state and its second `.pending`
+marker check. Both marker checks then observe no pending transition. Before
+the correction, `loadAndVerifyAuthState` accepted the now-stale `PREPARED`
+state despite the completed `ABORTED` write (focused regression RED, actual
+`PREPARED` vs expected `ABORTED`). The two-marker check was not a substitute
+for a state read lock.
+
+The reader now acquires the same bounded advisory lock as the writer, and
+`evaluateC1ToC4IntegrationCandidate` performs the state-dependent checks
+within that lock. Internal writer/recovery operations reuse the already-held
+lock rather than deadlocking on a recursive acquire. The test injects a real
+independent `ABORTED` writer immediately after taking a read snapshot: the
+writer either commits before the reader and the reader must observe `ABORTED`,
+or remains blocked until the reader finishes with the earlier state. A second
+Linux regression requires both readers and writers to fail closed under lock
+contention and to recover after the process holding the lock exits. The
+related DEV C1/C4 Node and live native daemon tests passed 20/20, with no SKIPs,
+including a separate concurrent-ABORT regression through the actual candidate
+evaluation entrypoint.
+The lock is a cooperative local writer/read isolation mechanism, **not**
+an independent host/root custody or rollback authority.
+
 ## Acceptance boundary
 
 A pending marker is deliberately **not** automatically clearable through the

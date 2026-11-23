@@ -4,8 +4,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -338,6 +339,99 @@ test("C1->C4 state serializes independent writers and retains its Linux lock ino
   assert.equal(lockAfter.dev, lockBefore.dev);
 });
 
+test("C1->C4 read cannot admit a stale PREPARED scope after a concurrent ABORT commits", { skip: process.platform !== "linux" }, (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-stale-reader-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const statePath = path.join(tmpDir, "state.json");
+  const nonce = "a".repeat(32);
+  const contractSha256 = "b".repeat(64);
+  initAnchoredAuthState(statePath, "c".repeat(40));
+  appendAuthStateTransition(statePath, { epoch: 1, nonce, contractSha256, status: "PREPARED" });
+
+  // Pause exactly after the reader acquired its old state bytes and attempt an
+  // independently locked ABORT before its second pending-marker check. Without
+  // reader-side exclusion, the writer commits and the old PREPARED is accepted.
+  // With reader-side exclusion, the timed writer cannot commit before the read.
+  const originalReadFileSync = fs.readFileSync;
+  let injected = false;
+  let writerCommitted = false;
+  fs.readFileSync = function interceptedRead(target, ...args) {
+    const result = originalReadFileSync.call(fs, target, ...args);
+    if (typeof target === "number" && !injected) {
+      injected = true;
+      const script = `import { appendAuthStateTransition } from ${JSON.stringify(new URL("./c1-c4-contract.mjs", import.meta.url).href)}; appendAuthStateTransition(process.argv[1], { epoch: 1, nonce: process.argv[2], contractSha256: process.argv[3], status: "ABORTED" });`;
+      const writer = spawnSync(process.execPath, ["--input-type=module", "-e", script, statePath, nonce, contractSha256], {
+        timeout: 1500, encoding: "utf8", cwd: THIS_DIR,
+      });
+      writerCommitted = writer.status === 0;
+      if (!writerCommitted && writer.error?.code !== "ETIMEDOUT") {
+        throw new Error(`concurrent writer unexpectedly failed: ${writer.error?.message ?? writer.stderr}`);
+      }
+    }
+    return result;
+  };
+  syncBuiltinESMExports();
+  let observed;
+  try {
+    observed = loadAndVerifyAuthState(statePath);
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    syncBuiltinESMExports();
+  }
+  assert.equal(injected, true, "fixture must interleave an independent writer after reading bytes");
+  if (writerCommitted) {
+    assert.equal(observed.entries.at(-1).status, "ABORTED",
+      "read must not verify the old PREPARED state after ABORT durably commits");
+  } else {
+    assert.equal(observed.entries.at(-1).status, "PREPARED",
+      "read may report PREPARED only while the concurrent writer is blocked");
+    assert.equal(loadAndVerifyAuthState(statePath).entries.at(-1).status, "PREPARED");
+  }
+});
+
+test("C1->C4 candidate evaluation holds the authorization scope stable against concurrent ABORT", { skip: process.platform !== "linux" }, (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-eval-race-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const fx = buildSyntheticFixture(tmpDir);
+  const originalReadFileSync = fs.readFileSync;
+  let intercepted = false;
+  let aborted = false;
+  fs.readFileSync = function interceptedRead(target, ...args) {
+    const snapshot = originalReadFileSync.call(fs, target, ...args);
+    if (typeof target === "number" && !intercepted) {
+      intercepted = true;
+      const script = `import { appendAuthStateTransition } from ${JSON.stringify(new URL("./c1-c4-contract.mjs", import.meta.url).href)}; appendAuthStateTransition(process.argv[1], { epoch: 1, nonce: process.argv[2], contractSha256: process.argv[3], status: "ABORTED" });`;
+      const writer = spawnSync(process.execPath, ["--input-type=module", "-e", script,
+        fx.stateFilePath, fx.contract.nonce, fx.contractDigestHex], { timeout: 1500, encoding: "utf8", cwd: THIS_DIR });
+      aborted = writer.status === 0;
+      if (!aborted && writer.error?.code !== "ETIMEDOUT") {
+        throw new Error(`concurrent ABORT failed unexpectedly: ${writer.error?.message ?? writer.stderr}`);
+      }
+    }
+    return snapshot;
+  };
+  syncBuiltinESMExports();
+  let result;
+  let error;
+  try {
+    result = evaluateC1ToC4IntegrationCandidate(fx);
+  } catch (caught) {
+    error = caught;
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    syncBuiltinESMExports();
+  }
+  assert.equal(intercepted, true, "evaluation must read real persistent authorization state");
+  if (aborted) {
+    assert.match(error?.message ?? "", /no active PREPARED authorization scope/u,
+      "a committed ABORT must invalidate the candidate even during evaluation");
+  } else {
+    assert.equal(result?.status, "DEFENSIVE_VERIFIED_NON_AUTHORIZING",
+      "an evaluation may succeed only while its competing ABORT remains blocked");
+    assert.equal(loadAndVerifyAuthState(fx.stateFilePath).entries.at(-1).status, "PREPARED");
+  }
+});
+
 test("C1->C4 Linux lock bounds contention and releases on owner exit before epoch recovery", { skip: process.platform !== "linux", timeout: 20000 }, async (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-lock-exit-"));
   const statePath = path.join(tmpDir, "state.json");
@@ -364,9 +458,15 @@ test("C1->C4 Linux lock bounds contention and releases on owner exit before epoc
   assert.throws(() => recoverAuthStateWithEpochFence(statePath));
   const elapsed = performance.now() - started;
   assert.ok(elapsed >= 4500 && elapsed < 9000, `unexpected contention duration: ${elapsed} ms`);
-  assert.equal(loadAndVerifyAuthState(statePath).currentEpoch, 1);
+  const readStarted = performance.now();
+  assert.throws(() => loadAndVerifyAuthState(statePath),
+    "a reader must also refuse while another process holds the write lock");
+  const readElapsed = performance.now() - readStarted;
+  assert.ok(readElapsed >= 4500 && readElapsed < 9000,
+    `unexpected locked-reader timeout: ${readElapsed} ms`);
   assert.equal(owner.kill("SIGKILL"), true);
   assert.deepEqual(await exited, [null, "SIGKILL"]);
+  assert.equal(loadAndVerifyAuthState(statePath).currentEpoch, 1);
   assert.equal(recoverAuthStateWithEpochFence(statePath).currentEpoch, 2);
   assert.equal(loadAndVerifyAuthState(statePath).currentEpoch, 2);
   assert.equal(fs.statSync(`${statePath}.lock`).ino, inode.ino);
