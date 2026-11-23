@@ -478,33 +478,38 @@ function withAuthStateLock(filePath, fn) {
 /** 5 & 6. Persistent hash-chained state, recovery fencing, and anti-rollback witness. */
 export function initAnchoredAuthState(filePath, anchorSha) {
   demand(GIT_SHA.test(anchorSha ?? ""), "anchorSha must be a 40-char lowercase git SHA");
-  const initial = {
-    version: 1,
-    anchorSha,
-    currentEpoch: 1,
-    sequenceFloor: 0,
-    faulted: false,
-    headEntrySha256: anchorDigest(anchorSha),
-    entries: [],
-  };
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
-  // Reserve the initial path exclusively before creating the marker. If the
-  // process crashes in this small window, the file is still empty and cannot
-  // be mistaken for initialized, verified state. A second initializer cannot
-  // overwrite a valid existing state or poison it with a fresh pending marker.
-  const fd = openSync(filePath, flags, 0o600);
-  let pendingPath;
-  try {
-    pendingPath = createPendingAuthIntent(filePath, flags);
-    const data = canonicalJsonBytes(initial);
-    writeAllSync(fd, data);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  fsyncParentDir(filePath);
-  completePendingAuthIntent(filePath, pendingPath, flags);
-  return initial;
+  // Genesis must hold the same lock as readers and later writers. Otherwise
+  // a concurrent reader can accept valid JSON after the intent unlink but
+  // before the final parent fsync has durably committed that unlink.
+  return withAuthStateLock(filePath, () => {
+    const initial = {
+      version: 1,
+      anchorSha,
+      currentEpoch: 1,
+      sequenceFloor: 0,
+      faulted: false,
+      headEntrySha256: anchorDigest(anchorSha),
+      entries: [],
+    };
+    const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+    // Reserve the initial path exclusively before creating the marker. If the
+    // process crashes in this small window, the file is still empty and cannot
+    // be mistaken for initialized, verified state. A second initializer cannot
+    // overwrite a valid existing state or poison it with a fresh pending marker.
+    const fd = openSync(filePath, flags, 0o600);
+    let pendingPath;
+    try {
+      pendingPath = createPendingAuthIntent(filePath, flags);
+      const data = canonicalJsonBytes(initial);
+      writeAllSync(fd, data);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    fsyncParentDir(filePath);
+    completePendingAuthIntent(filePath, pendingPath, flags);
+    return initial;
+  });
 }
 
 function readAndVerifyAuthStateWithoutLock(filePath) {

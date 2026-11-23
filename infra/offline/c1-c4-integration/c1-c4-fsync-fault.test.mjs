@@ -102,6 +102,55 @@ test("C1->C4 DEV genesis post-unlink fsync EIO reinstates the recovery marker", 
   skip: process.platform !== "linux",
 }, (t) => failGenesisSyncWhen(t, (file) => !fs.existsSync(`${file}.pending`)));
 
+test("C1->C4 DEV genesis refuses concurrent readers until its final parent fsync commits", {
+  skip: process.platform !== "linux",
+}, (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1-c4-genesis-reader-race-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "state.json");
+  const readerReady = path.join(dir, "reader-ready");
+  const childCode = `
+    import fs from "node:fs";
+    import { loadAndVerifyAuthState } from ${JSON.stringify(new URL("./c1-c4-contract.mjs", import.meta.url).href)};
+    fs.writeFileSync(process.argv[2], "reader started", { flag: "wx" });
+    const state = loadAndVerifyAuthState(process.argv[1]);
+    console.log("OBSERVED_UNCOMMITTED_GENESIS=" + state.sequenceFloor);
+  `;
+  const original = fs.fsyncSync;
+  let injected = false;
+  let concurrentRead;
+  fs.fsyncSync = (fd) => {
+    // After the intent unlink, but before its parent fsync, the JSON already
+    // looks valid; readers must hold the same lock as genesis, not race it.
+    if (!injected && fs.fstatSync(fd).isDirectory() && fs.existsSync(file) &&
+      !fs.existsSync(`${file}.pending`)) {
+      injected = true;
+      concurrentRead = spawnSync(process.execPath,
+        ["--input-type=module", "--eval", childCode, file, readerReady],
+        { encoding: "utf8", timeout: 1200 });
+      const error = new Error("INJECTED_GENESIS_FINAL_FSYNC_EIO_AFTER_CONCURRENT_READER");
+      error.code = "EIO";
+      throw error;
+    }
+    return original(fd);
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => initAnchoredAuthState(file, "a".repeat(40)),
+      /INJECTED_GENESIS_FINAL_FSYNC_EIO_AFTER_CONCURRENT_READER/u);
+  } finally {
+    fs.fsyncSync = original;
+    syncBuiltinESMExports();
+  }
+  assert.equal(injected, true, "the final post-unlink parent fsync must be intercepted");
+  assert.equal(fs.readFileSync(readerReady, "utf8"), "reader started",
+    "the concurrent process must reach the read call, not simply time out during startup");
+  assert.equal(concurrentRead?.error?.code, "ETIMEDOUT",
+    `another process must not read an uncommitted genesis: ${concurrentRead?.stdout ?? ""}`);
+  assert.doesNotMatch(concurrentRead?.stdout ?? "", /OBSERVED_UNCOMMITTED_GENESIS/u);
+  assertAmbiguityFenced(file);
+});
+
 test("C1->C4 DEV initialization never overwrites an already initialized state", (t) => {
   const file = fixture(t);
   assert.throws(() => initAnchoredAuthState(file, "c".repeat(40)), { code: "EEXIST" });
