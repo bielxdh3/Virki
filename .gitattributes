@@ -7,3 +7,4 @@ infra/offline/patches/buildkit-v0.34.1-c1-v51-to-v52-four-protected-dev.patch -t
 infra/offline/patches/buildkit-v0.34.1-c1-v51-to-v51r-preclaim-dev.patch -text -whitespace
 infra/offline/patches/buildkit-v0.34.1-c1-v51r-to-v52-four-protected-dev.patch -text -whitespace
 infra/offline/fixtures/fake-image-import-docker text eol=lf
+infra/offline/patches/buildkit-v0.34.1-c1-v52-to-v53-root-fd-filesync-dev.patch -text -whitespace

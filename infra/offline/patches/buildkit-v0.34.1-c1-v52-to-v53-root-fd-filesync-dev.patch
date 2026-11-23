@@ -1,0 +1,1358 @@
+diff --git a/session/filesync/sealed_publication_v52_group_dev_linux.go b/session/filesync/sealed_publication_v52_group_dev_linux.go
+index a997c9f..b54010b 100644
+--- a/session/filesync/sealed_publication_v52_group_dev_linux.go
++++ b/session/filesync/sealed_publication_v52_group_dev_linux.go
+@@ -22,14 +22,18 @@ import (
+ // V3 TEST-only Manager scope and a separately rooted V40 replay ledger.
+ // Vertex/snapshot identifiers remain test inputs, NOT witnessed solver facts.
+ type V52DevProtectedInput struct {
+-	Conn        *net.UnixConn
+-	SenderPID   int
+-	SenderUID   uint32
+-	SenderGID   uint32
+-	Destination string
+-	Manifest    V15SealedManifest
+-	TestPermit  V15OwnerPermit
+-	Record      localcontext.Consumption
++	Conn *net.UnixConn
++	// SupervisorStage is the root-retained FD for the receiver stage created
++	// beneath a root-only parent. V53 requires the returned SCM_RIGHTS FD to
++	// identify this exact inode before any V40 permit can be consumed.
++	SupervisorStage *os.File
++	SenderPID       int
++	SenderUID       uint32
++	SenderGID       uint32
++	Destination     string
++	Manifest        V15SealedManifest
++	TestPermit      V15OwnerPermit
++	Record          localcontext.Consumption
+ }
+ 
+ type V52DevProtectedGroup struct {
+@@ -138,7 +142,7 @@ func publishV52FourProtectedContexts(ctx context.Context, manager *localcontext.
+ 		senderUIDs[input.SenderUID] = true
+ 		destinations[input.Destination] = true
+ 		if input.SenderUID == 0 || input.SenderGID == 0 || input.SenderPID <= 1 ||
+-			input.Conn == nil || !filepath.IsAbs(input.Destination) ||
++			input.Conn == nil || input.SupervisorStage == nil || !filepath.IsAbs(input.Destination) ||
+ 			filepath.Clean(input.Destination) != input.Destination {
+ 			return nil, fmt.Errorf("V52 DEV sender/destination %d cannot be trusted", i)
+ 		}
+@@ -183,8 +187,8 @@ func publishV52FourProtectedContexts(ctx context.Context, manager *localcontext.
+ 				return nil, fmt.Errorf("V52 DEV interpublication fault before %s: %w", names[i], err)
+ 			}
+ 		}
+-		if err := PublishV51DevContextToV3(ctx, manager, group.LedgerDir, input.Conn,
+-			input.SenderPID, input.SenderUID, input.SenderGID, input.Destination,
++		if err := PublishV53DevContextToV3(ctx, manager, group.LedgerDir, input.Conn,
++			input.SenderPID, input.SenderUID, input.SenderGID, int(input.SupervisorStage.Fd()), input.Destination,
+ 			input.Manifest, input.TestPermit, group.TestPermitKey,
+ 			group.MinimumEpoch, group.MaximumEpoch, input.Record); err != nil {
+ 			return nil, fmt.Errorf("V52 DEV protected context %d/%d (%s) rejected: %w", i+1, len(names), names[i], err)
+diff --git a/session/filesync/sealed_publication_v52_group_dev_linux_test.go b/session/filesync/sealed_publication_v52_group_dev_linux_test.go
+index 5e97094..5003dbd 100644
+--- a/session/filesync/sealed_publication_v52_group_dev_linux_test.go
++++ b/session/filesync/sealed_publication_v52_group_dev_linux_test.go
+@@ -63,6 +63,7 @@ type v52RealFixture struct {
+ 	expectBytes [4][]byte
+ 	connections [4]*net.UnixConn
+ 	cmds        [4]*exec.Cmd
++	stages      [4]*V53SupervisorStage
+ }
+ 
+ func v52RequireRootFixture(t *testing.T) {
+@@ -86,18 +87,50 @@ func v52ChildSender(t *testing.T) bool {
+ 	if err != nil || os.Getuid() != expectedUID || os.Geteuid() != expectedUID {
+ 		t.Fatal("V52 test sender is not running under the expected distinct UID")
+ 	}
+-	source, err := os.Open(os.Getenv("VIRKI_V52_SOURCE"))
++	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
++		t.Fatal(err)
++	}
++	if err := enforceV32NonDumpableReceiver(); err != nil {
++		t.Fatal(err)
++	}
++	stageFD := 3 // inherited from the trusted root supervisor via ExtraFiles
++	stagePath := fmt.Sprintf("/proc/self/fd/%d", stageFD)
++	source, err := os.Open(filepath.Join(os.Getenv("VIRKI_V52_SOURCE"), "app.js"))
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+-	defer source.Close()
++	output, err := os.OpenFile(filepath.Join(stagePath, "app.js"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
++	if err != nil {
++		_ = source.Close()
++		t.Fatal(err)
++	}
++	if _, err := io.Copy(output, source); err != nil {
++		_ = output.Close()
++		_ = source.Close()
++		t.Fatal(err)
++	}
++	if err := output.Sync(); err != nil {
++		_ = output.Close()
++		_ = source.Close()
++		t.Fatal(err)
++	}
++	if err := output.Close(); err != nil {
++		_ = source.Close()
++		t.Fatal(err)
++	}
++	if err := source.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := unix.Fsync(stageFD); err != nil {
++		t.Fatal(err)
++	}
+ 	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{
+ 		Name: os.Getenv("VIRKI_V52_SOCKET"), Net: "unix"})
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	defer conn.Close()
+-	if _, _, err := conn.WriteMsgUnix([]byte{'V'}, unix.UnixRights(int(source.Fd())), nil); err != nil {
++	if _, _, err := conn.WriteMsgUnix([]byte{'V'}, unix.UnixRights(stageFD), nil); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	// Remain alive until the root supervisor closes the socket or cleans up.
+@@ -132,6 +165,12 @@ func v52NewPhysicalFixtureWithUIDs(t *testing.T, sameUID bool) *v52RealFixture {
+ 				_ = f.cmds[i].Wait()
+ 			}
+ 		}
++		for i := range f.stages {
++			if f.stages[i] != nil {
++				_ = f.stages[i].Cleanup()
++				_ = f.stages[i].Close()
++			}
++		}
+ 		_ = os.RemoveAll(f.base)
+ 	})
+ 	if err := os.Chmod(f.base, 0711); err != nil {
+@@ -140,13 +179,14 @@ func v52NewPhysicalFixtureWithUIDs(t *testing.T, sameUID bool) *v52RealFixture {
+ 	f.ledger = filepath.Join(f.base, "ledger")
+ 	f.trust = v40TrustDir(f.ledger)
+ 	protected := filepath.Join(f.base, "protected")
++	stageParent := filepath.Join(f.base, "stage-parent")
+ 	f.group = V52DevProtectedGroup{
+ 		GroupGeneration: strings.Repeat("a", 32),
+ 		LedgerDir:       f.ledger,
+ 		FenceDir:        filepath.Join(f.base, "group-fence"),
+ 		MinimumEpoch:    7, MaximumEpoch: 8,
+ 	}
+-	for _, dir := range []string{f.ledger, f.trust, protected, f.group.FenceDir} {
++	for _, dir := range []string{f.ledger, f.trust, protected, stageParent, f.group.FenceDir} {
+ 		if err := os.Mkdir(dir, 0700); err != nil {
+ 			t.Fatal(err)
+ 		}
+@@ -256,6 +296,10 @@ func v52NewPhysicalFixtureWithUIDs(t *testing.T, sameUID bool) *v52RealFixture {
+ 			Nonce: m.Nonce, Epoch: 7, ExpiresUnix: time.Now().Add(time.Hour).Unix(),
+ 		}
+ 		p.Signature = ed25519.Sign(private, v15PermitBytes(p))
++		f.stages[i], err = CreateV53SupervisorStage(stageParent, uid, uid)
++		if err != nil {
++			t.Fatal(err)
++		}
+ 		// The expected tree originates from an INDEPENDENT root-controlled
+ 		// reference, never from the untrusted sender's mutable filesystem.
+ 		reference := filepath.Join(protected, "reference-"+strconv.Itoa(i))
+@@ -295,6 +339,7 @@ func v52NewPhysicalFixtureWithUIDs(t *testing.T, sameUID bool) *v52RealFixture {
+ 			"VIRKI_V52_SOURCE=" + sourceDir,
+ 			"VIRKI_V52_SOCKET=" + socket,
+ 		}
++		cmd.ExtraFiles = []*os.File{f.stages[i].Stage}
+ 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
+ 			Uid: uid, Gid: uid, Groups: []uint32{},
+ 		}}
+@@ -314,7 +359,7 @@ func v52NewPhysicalFixtureWithUIDs(t *testing.T, sameUID bool) *v52RealFixture {
+ 		}
+ 		f.connections[i] = conn
+ 		f.group.Inputs[i] = V52DevProtectedInput{
+-			Conn: conn, SenderPID: cmd.Process.Pid,
++			Conn: conn, SupervisorStage: f.stages[i].Stage, SenderPID: cmd.Process.Pid,
+ 			SenderUID: uid, SenderGID: uid,
+ 			Destination: filepath.Join(protected, "candidate-"+strconv.Itoa(i)),
+ 			Manifest:    m, TestPermit: p,
+@@ -540,6 +585,21 @@ func TestC1V52FourProtectedContextsOneSolve(t *testing.T) {
+ 			t.Fatalf("forged SenderUID metadata must be rejected before group fence creation: %v", err)
+ 		}
+ 	})
++	// V53: the receiver's actual SCM_RIGHTS inode must be the supervisor's
++	// previously retained handle, never another same-UID directory picked by
++	// a caller. A mismatch must not burn even the first durable V40 permit.
++	t.Run("forged supervisor stage FD refused before the first V40 claim", func(t *testing.T) {
++		f := v52NewPhysicalFixture(t)
++		f.group.Inputs[0].SupervisorStage = f.stages[1].Stage
++		_, err := PublishV52DevFourProtectedContexts(f.ctx, f.manager, f.scope, f.group)
++		if err == nil || !strings.Contains(err.Error(), "root-supervisor-retained receiver stage inode") {
++			t.Fatalf("V53 accepted a stage FD not pinned by root supervisor: %v", err)
++		}
++		f.assertNoCandidate(t, 0)
++		if state, stateErr := f.fenceText(); stateErr != nil || state != v52Fenced {
++			t.Fatalf("forged V53 source FD must leave a durable FENCED marker: %q %v", state, stateErr)
++		}
++	})
+ 	t.Run("epoch-floor revocation between group preclaim and first V40 claim is honored", func(t *testing.T) {
+ 		f := v52NewPhysicalFixture(t)
+ 		before := func(i int) error {
+diff --git a/session/filesync/sealed_publication_v53_filesync_broker_linux.go b/session/filesync/sealed_publication_v53_filesync_broker_linux.go
+new file mode 100755
+index 0000000..e7cad3e
+--- /dev/null
++++ b/session/filesync/sealed_publication_v53_filesync_broker_linux.go
+@@ -0,0 +1,524 @@
++//go:build linux && virki_c1c4_dev
++
++package filesync
++
++import (
++	"context"
++	"crypto/ed25519"
++	"crypto/rand"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"path/filepath"
++	"slices"
++	"strings"
++	"time"
++
++	"github.com/moby/buildkit/session"
++	"github.com/moby/buildkit/util/localcontext"
++	"github.com/tonistiigi/fsutil"
++	"golang.org/x/sys/unix"
++	"google.golang.org/grpc"
++	"google.golang.org/grpc/metadata"
++)
++
++// V53SupervisorStage is allocated by the trusted root supervisor beneath a
++// root:root 0700 parent. The stage directory itself is receiver-owned 0700,
++// but its pathname is unreachable to the receiver UID and every same-UID
++// process. The supervisor retains both handles; only Stage is inherited by
++// the unprivileged receiver. No receiver-side pathname rename is involved.
++type V53SupervisorStage struct {
++	Parent     *os.File
++	Stage      *os.File
++	Name       string
++	ParentPath string
++}
++
++// CreateV53SupervisorStage creates an empty, receiver-writable directory under
++// an independently root-controlled parent and returns the pinned descriptors.
++// The caller must pass Stage to the receiver with ExtraFiles/SCM_RIGHTS and
++// retain its own copy until the receiver exits and the broker finishes.
++func CreateV53SupervisorStage(parentPath string, receiverUID, receiverGID uint32) (*V53SupervisorStage, error) {
++	if os.Getuid() != 0 || os.Geteuid() != 0 || receiverUID == 0 || receiverGID == 0 ||
++		!filepath.IsAbs(parentPath) || filepath.Clean(parentPath) != parentPath || parentPath == "/" {
++		return nil, errors.New("C1 V53 stage creation requires root supervisor, nonroot receiver and canonical protected parent")
++	}
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return nil, err
++	}
++	defer unix.Close(rootFD)
++	if err := validateV24TrustedSupervisorAncestors(rootFD, parentPath); err != nil {
++		return nil, fmt.Errorf("C1 V53 stage parent ancestry is not root-supervised: %w", err)
++	}
++	parentFD, err := unix.Openat2(rootFD, strings.TrimPrefix(parentPath, "/"), &unix.OpenHow{
++		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
++	})
++	if err != nil {
++		return nil, fmt.Errorf("C1 V53 root supervisor cannot pin stage parent: %w", err)
++	}
++	var parentStat unix.Stat_t
++	if err := unix.Fstat(parentFD, &parentStat); err != nil || parentStat.Mode&unix.S_IFMT != unix.S_IFDIR ||
++		parentStat.Uid != 0 || parentStat.Gid != 0 || parentStat.Mode&07777 != 0700 {
++		_ = unix.Close(parentFD)
++		return nil, fmt.Errorf("C1 V53 stage parent must be root:root 0700: %w", err)
++	}
++	var name string
++	for attempt := 0; attempt < 8; attempt++ {
++		var nonce [16]byte
++		if _, err := rand.Read(nonce[:]); err != nil {
++			_ = unix.Close(parentFD)
++			return nil, err
++		}
++		candidate := ".virki-v53-" + hex.EncodeToString(nonce[:])
++		if err := unix.Mkdirat(parentFD, candidate, 0700); err == nil {
++			name = candidate
++			break
++		} else if !errors.Is(err, unix.EEXIST) {
++			_ = unix.Close(parentFD)
++			return nil, err
++		}
++	}
++	if name == "" {
++		_ = unix.Close(parentFD)
++		return nil, errors.New("C1 V53 could not allocate unique supervisor stage")
++	}
++	stageFD, err := unix.Openat(parentFD, name,
++		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
++	if err != nil {
++		_ = unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
++		_ = unix.Close(parentFD)
++		return nil, err
++	}
++	if err := unix.Fchown(stageFD, int(receiverUID), int(receiverGID)); err != nil {
++		_ = unix.Close(stageFD)
++		_ = unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
++		_ = unix.Close(parentFD)
++		return nil, err
++	}
++	if err := unix.Fchmod(stageFD, 0700); err != nil {
++		_ = unix.Close(stageFD)
++		_ = unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
++		_ = unix.Close(parentFD)
++		return nil, err
++	}
++	if err := unix.Fsync(parentFD); err != nil {
++		_ = unix.Close(stageFD)
++		_ = unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
++		_ = unix.Close(parentFD)
++		return nil, err
++	}
++	stage := &V53SupervisorStage{
++		Parent: os.NewFile(uintptr(parentFD), "v53-root-stage-parent"),
++		Stage:  os.NewFile(uintptr(stageFD), "v53-receiver-stage"),
++		Name:   name, ParentPath: parentPath,
++	}
++	if err := stage.Verify(receiverUID, receiverGID); err != nil {
++		_ = stage.Cleanup()
++		_ = stage.Close()
++		return nil, err
++	}
++	return stage, nil
++}
++
++// Verify binds the retained directory descriptor to the root-only parent name.
++// This check is performed by the supervisor, which owns the parent FD; the
++// unprivileged receiver never needs pathname access to that parent.
++func (s *V53SupervisorStage) Verify(receiverUID, receiverGID uint32) error {
++	if s == nil || s.Parent == nil || s.Stage == nil || s.Name == "" ||
++		s.Name == "." || s.Name == ".." || strings.ContainsAny(s.Name, "/\\") {
++		return errors.New("C1 V53 supervisor stage handle is incomplete")
++	}
++	var parent, byName, byFD unix.Stat_t
++	if err := unix.Fstat(int(s.Parent.Fd()), &parent); err != nil {
++		return err
++	}
++	if parent.Mode&unix.S_IFMT != unix.S_IFDIR || parent.Uid != 0 || parent.Gid != 0 || parent.Mode&07777 != 0700 {
++		return errors.New("C1 V53 supervisor stage parent lost root-only custody")
++	}
++	if err := unix.Fstat(int(s.Stage.Fd()), &byFD); err != nil {
++		return err
++	}
++	if byFD.Mode&unix.S_IFMT != unix.S_IFDIR || byFD.Uid != receiverUID || byFD.Gid != receiverGID || byFD.Mode&07777 != 0700 {
++		return errors.New("C1 V53 pinned stage FD is not receiver-owned 0700")
++	}
++	if err := unix.Fstatat(int(s.Parent.Fd()), s.Name, &byName, unix.AT_SYMLINK_NOFOLLOW); err != nil {
++		return err
++	}
++	if byName.Mode&unix.S_IFMT != unix.S_IFDIR || byName.Dev != byFD.Dev || byName.Ino != byFD.Ino ||
++		byName.Uid != receiverUID || byName.Gid != receiverGID || byName.Mode&07777 != 0700 {
++		return errors.New("C1 V53 supervisor stage pathname no longer identifies pinned receiver directory")
++	}
++	return nil
++}
++
++// Cleanup is only safe after the receiver child has exited. The parent is
++// root-owned 0700, so no untrusted same-UID process can substitute the name.
++func (s *V53SupervisorStage) Cleanup() error {
++	if s == nil || s.Parent == nil || s.Stage == nil {
++		return nil
++	}
++	var byName, byFD unix.Stat_t
++	if err := unix.Fstat(int(s.Stage.Fd()), &byFD); err != nil {
++		return err
++	}
++	if err := unix.Fstatat(int(s.Parent.Fd()), s.Name, &byName, unix.AT_SYMLINK_NOFOLLOW); err != nil {
++		if errors.Is(err, unix.ENOENT) {
++			return nil
++		}
++		return err
++	}
++	if byName.Dev != byFD.Dev || byName.Ino != byFD.Ino || byName.Mode&unix.S_IFMT != unix.S_IFDIR {
++		return errors.New("C1 V53 cleanup refuses a replaced supervisor stage name")
++	}
++	path := fmt.Sprintf("/proc/self/fd/%d/%s", s.Parent.Fd(), s.Name)
++	if err := os.RemoveAll(path); err != nil {
++		return err
++	}
++	return unix.Fsync(int(s.Parent.Fd()))
++}
++
++func (s *V53SupervisorStage) Close() error {
++	if s == nil {
++		return nil
++	}
++	var stageErr, parentErr error
++	if s.Stage != nil {
++		stageErr = s.Stage.Close()
++	}
++	if s.Parent != nil {
++		parentErr = s.Parent.Close()
++	}
++	return errors.Join(stageErr, parentErr)
++}
++
++// FSSyncSealedV53Dev receives the actual sealed gRPC FileSync stream directly
++// into a stage FD pre-created by the root supervisor. It NEVER publishes or
++// renames the stage by pathname. The same pinned FD is handed to the V51R/V52
++// root broker, which authenticates the receiver and copies only manifest-exact
++// bytes into fresh root-owned inodes before the protected atomic publication.
++//
++// This remains DEV-only; it does not enable production C1, C4 signing or deploy.
++func FSSyncSealedV53Dev(ctx context.Context, caller session.Caller, opt FSSendRequestOpt,
++	manifest V15SealedManifest, permit V15OwnerPermit, trustedOwnerPub ed25519.PublicKey,
++	ledger *V15LocalReplayLedger, stageFD int, brokerSocket string,
++	policy V24ReceiverCustodyPolicy) error {
++	return fssyncSealedV53DevWithHooks(ctx, caller, opt, manifest, permit,
++		trustedOwnerPub, ledger, stageFD, brokerSocket, policy, nil, nil)
++}
++
++// afterReceive is an unexported deterministic test seam. It runs after the
++// gRPC stream is sealed in the supervisor-provided inode and before the FD is
++// handed to the broker. It cannot change the inherited FD or supervisor policy.
++func fssyncSealedV53DevWithHooks(ctx context.Context, caller session.Caller,
++	opt FSSendRequestOpt, manifest V15SealedManifest, permit V15OwnerPermit,
++	trustedOwnerPub ed25519.PublicKey, ledger *V15LocalReplayLedger,
++	stageFD int, brokerSocket string, policy V24ReceiverCustodyPolicy,
++	beforeReceive, afterReceive func() error) error {
++	if ctx == nil || caller == nil || ledger == nil || stageFD < 0 || len(trustedOwnerPub) != ed25519.PublicKeySize ||
++		opt.OnConsumed != nil || opt.DestDir != "" || opt.Name != manifest.ContextName ||
++		len(opt.IncludePatterns) != 0 || len(opt.ExcludePatterns) != 0 || len(manifest.ExcludePatterns) != 0 ||
++		opt.MetadataOnly || opt.CacheUpdater != nil || opt.ProgressCb != nil ||
++		opt.Filter != nil || opt.MetadataOnlyFilter != nil {
++		return errors.New("C1 V53 requires sealed FileSync inputs, supervisor stage FD, TEST ledger and no receiver pathname publication")
++	}
++	if err := validateV53ReceiverPolicy(policy); err != nil {
++		return err
++	}
++	if err := validateV53ReceiverStageFD(stageFD, *policy.ExpectedReceiverUID, *policy.ExpectedReceiverGID, true); err != nil {
++		return err
++	}
++	paths := make([]string, 0, len(manifest.Files))
++	var pinBytes int64
++	for _, file := range manifest.Files {
++		paths = append(paths, file.Path)
++		pinBytes += file.Size
++	}
++	if manifest.Schema != "virki-c1-v15-memory-fs-1" || manifest.Digest == "" || v15ManifestDigest(manifest) != manifest.Digest ||
++		pinBytes != manifest.Bytes || manifest.Bytes < 0 || manifest.Bytes > 64<<20 || !slices.Equal(paths, opt.FollowPaths) {
++		return errors.New("C1 V53 sealed manifest, file budget or exact FollowPaths mismatch")
++	}
++	if err := validateV15Request(V15SnapshotRequest{Root: "v53-supervisor-pinned-fd", ContextName: manifest.ContextName,
++		WorkerID: manifest.WorkerID, SessionID: manifest.SessionID, Nonce: manifest.Nonce, Files: manifest.Files}); err != nil {
++		return err
++	}
++	if err := ledger.VerifyAndClaim(manifest, permit, trustedOwnerPub); err != nil {
++		return err
++	}
++	if !caller.Supports(session.MethodURL(sealedServiceNameV15, sealedMethodV15)) {
++		return errors.New("C1 V53 sealed FileSync capability absent: legacy diffcopy fallback forbidden")
++	}
++	ctx = caller.Context(ctx)
++	ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs(v15MDManifest, manifest.Digest, v15MDWorker, manifest.WorkerID,
++		v15MDSession, manifest.SessionID, v15MDNonce, manifest.Nonce, v15MDRole, manifest.ContextName))
++	stream, err := caller.Conn().NewStream(ctx, &grpc.StreamDesc{StreamName: sealedMethodV15,
++		ServerStreams: true, ClientStreams: true}, sealedRPCV15)
++	if err != nil {
++		return err
++	}
++	hdr, err := stream.Header()
++	if err != nil {
++		return fmt.Errorf("C1 V53 sealed sender handshake denied: %w", err)
++	}
++	if !v15One(hdr, v15MDManifest, manifest.Digest) || !v15One(hdr, v15MDWorker, manifest.WorkerID) ||
++		!v15One(hdr, v15MDSession, manifest.SessionID) || !v15One(hdr, v15MDNonce, manifest.Nonce) {
++		return errors.New("C1 V53 sealed sender gave wrong or missing versioned manifest header")
++	}
++	if beforeReceive != nil {
++		if err := beforeReceive(); err != nil {
++			return fmt.Errorf("C1 V53 pre-receive test barrier: %w", err)
++		}
++	}
++	stagePath := fmt.Sprintf("/proc/self/fd/%d", stageFD)
++	// ReceiveRoot anchors ALL FileSync disk operations to a directory handle
++	// rather than walking the supervisor-owned parent path. Plain Receive()
++	// uses path based lstat and cannot traverse a protected root 0700 parent.
++	stageRoot, err := os.OpenRoot(stagePath)
++	if err != nil {
++		return fmt.Errorf("C1 V53 cannot open inherited stage as rooted FS: %w", err)
++	}
++	guard := newV15PacketGuardWithOwner(stream, manifest, *policy.ExpectedSenderUID, *policy.ExpectedSenderGID)
++	err = fsutil.ReceiveRoot(ctx, guard, fsutil.NewRoot(stageRoot), fsutil.ReceiveOpt{Differ: opt.Differ})
++	closeErr := stageRoot.Close()
++	if err == nil {
++		_ = stream.CloseSend()
++	}
++	if err != nil || closeErr != nil {
++		return fmt.Errorf("C1 V53 gRPC stream into supervisor-pinned stage failed: %w", errors.Join(err, closeErr))
++	}
++	if err := verifyV23StageTreeFD(stageFD, manifest); err != nil {
++		return fmt.Errorf("C1 V53 pinned stage membership refused: %w", err)
++	}
++	if err := verifyAndSyncV22Stage(stageFD, manifest); err != nil {
++		return fmt.Errorf("C1 V53 pinned stage bytes/fsync refused: %w", err)
++	}
++	if err := verifyV23StageTreeFD(stageFD, manifest); err != nil {
++		return fmt.Errorf("C1 V53 pinned stage changed after seal: %w", err)
++	}
++	if err := verifyAndSyncV22Stage(stageFD, manifest); err != nil {
++		return fmt.Errorf("C1 V53 pinned stage changed before handoff: %w", err)
++	}
++	if afterReceive != nil {
++		if err := afterReceive(); err != nil {
++			return fmt.Errorf("C1 V53 post-receive test barrier: %w", err)
++		}
++	}
++	if err := validateV53ReceiverStageFD(stageFD, *policy.ExpectedReceiverUID, *policy.ExpectedReceiverGID, false); err != nil {
++		return fmt.Errorf("C1 V53 supervisor stage handle changed before handoff: %w", err)
++	}
++	if err := validateV53BrokerSocket(brokerSocket, *policy.ExpectedReceiverGID); err != nil {
++		return err
++	}
++	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: brokerSocket, Net: "unix"})
++	if err != nil {
++		return fmt.Errorf("C1 V53 root publication broker connection refused: %w", err)
++	}
++	defer conn.Close()
++	if err := conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
++		return err
++	}
++	n, oobn, err := conn.WriteMsgUnix([]byte{'V'}, unix.UnixRights(stageFD), nil)
++	if err != nil {
++		return fmt.Errorf("C1 V53 supervisor-pinned stage FD handoff failed: %w", err)
++	}
++	if n != 1 || oobn == 0 {
++		return errors.New("C1 V53 broker handoff did not send exactly one marker and SCM_RIGHTS FD")
++	}
++	var ack [1]byte
++	if _, err := io.ReadFull(conn, ack[:]); err != nil {
++		return fmt.Errorf("C1 V53 root broker did not return terminal publication result: %w", err)
++	}
++	if ack[0] != 'O' {
++		return errors.New("C1 V53 root broker refused protected publication; TEST permit is not retryable")
++	}
++	return nil
++}
++
++func validateV53ReceiverPolicy(policy V24ReceiverCustodyPolicy) error {
++	if !policy.RequireUnprivileged || policy.ExpectedReceiverUID == nil || policy.ExpectedReceiverGID == nil ||
++		policy.ExpectedSenderUID == nil || policy.ExpectedSenderGID == nil ||
++		*policy.ExpectedReceiverUID == 0 || *policy.ExpectedReceiverGID == 0 ||
++		*policy.ExpectedSenderUID == 0 || *policy.ExpectedSenderGID == 0 ||
++		*policy.ExpectedReceiverUID == *policy.ExpectedSenderUID ||
++		*policy.ExpectedReceiverGID == *policy.ExpectedSenderGID ||
++		!slices.Contains(policy.ForbiddenPeerUIDs, *policy.ExpectedSenderUID) ||
++		policy.PrivateTempDir == "" || os.TempDir() != policy.PrivateTempDir {
++		return errors.New("C1 V53 requires independently provisioned distinct nonroot receiver/sender identities and private TMPDIR")
++	}
++	if os.Getuid() == 0 || os.Geteuid() == 0 || os.Getuid() != os.Geteuid() ||
++		os.Getgid() != os.Getegid() || uint32(os.Geteuid()) != *policy.ExpectedReceiverUID ||
++		uint32(os.Getegid()) != *policy.ExpectedReceiverGID {
++		return errors.New("C1 V53 receiver process identity differs from supervisor policy")
++	}
++	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
++		return fmt.Errorf("C1 V53 receiver cannot set NoNewPrivs: %w", err)
++	}
++	if groups, err := os.Getgroups(); err != nil {
++		return err
++	} else if len(groups) != 0 {
++		return errors.New("C1 V53 receiver refuses supplementary groups")
++	}
++	if err := validateV24NoCapabilities(); err != nil {
++		return fmt.Errorf("C1 V53 receiver capabilities: %w", err)
++	}
++	if err := enforceV32NonDumpableReceiver(); err != nil {
++		return fmt.Errorf("C1 V53 receiver dumpability: %w", err)
++	}
++	if err := validateV24CustodyDirs(filepath.Join(policy.PrivateTempDir, "tmp-probe"), V24ReceiverCustodyPolicy{RequirePrivateParent: true}); err != nil {
++		return fmt.Errorf("C1 V53 private temporary directory: %w", err)
++	}
++	return nil
++}
++
++func validateV53ReceiverStageFD(stageFD int, expectedUID, expectedGID uint32, requireEmpty bool) error {
++	if stageFD < 0 || expectedUID == 0 || expectedGID == 0 {
++		return errors.New("C1 V53 supervisor stage descriptor/receiver identity is invalid")
++	}
++	var st unix.Stat_t
++	if err := unix.Fstat(stageFD, &st); err != nil {
++		return err
++	}
++	if st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != expectedUID || st.Gid != expectedGID || st.Mode&07777 != 0700 {
++		return errors.New("C1 V53 inherited stage FD must be receiver-owned private directory")
++	}
++	flags, err := unix.FcntlInt(uintptr(stageFD), unix.F_GETFL, 0)
++	if err != nil || flags&unix.O_PATH != 0 || flags&unix.O_DIRECTORY == 0 || flags&unix.O_ACCMODE != unix.O_RDONLY {
++		return fmt.Errorf("C1 V53 inherited stage FD must be a readable directory handle: %w", err)
++	}
++	if !requireEmpty {
++		unix.CloseOnExec(stageFD)
++		return nil
++	}
++	dup, err := unix.Openat(stageFD, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return err
++	}
++	file := os.NewFile(uintptr(dup), "v53-stage-empty-check")
++	entries, readErr := file.ReadDir(1)
++	closeErr := file.Close()
++	if readErr != nil && !errors.Is(readErr, io.EOF) {
++		return errors.Join(readErr, closeErr)
++	}
++	if len(entries) != 0 || !errors.Is(readErr, io.EOF) || closeErr != nil {
++		return errors.Join(errors.New("C1 V53 supervisor stage must be empty before FileSync"), closeErr)
++	}
++	unix.CloseOnExec(stageFD)
++	return nil
++}
++
++func validateV53BrokerSocket(socketPath string, expectedGroup uint32) error {
++	if !filepath.IsAbs(socketPath) || filepath.Clean(socketPath) != socketPath || socketPath == "/" {
++		return errors.New("C1 V53 broker socket must be canonical absolute path")
++	}
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return err
++	}
++	defer unix.Close(rootFD)
++	parent := filepath.Dir(socketPath)
++	if err := validateV24TrustedSupervisorAncestors(rootFD, parent); err != nil {
++		return fmt.Errorf("C1 V53 broker socket ancestry is not root-supervised: %w", err)
++	}
++	parentFD, err := unix.Openat2(rootFD, strings.TrimPrefix(parent, "/"), &unix.OpenHow{
++		Flags:   uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
++	})
++	if err != nil {
++		return fmt.Errorf("C1 V53 broker parent cannot be pinned: %w", err)
++	}
++	defer unix.Close(parentFD)
++	var parentStat, socketStat unix.Stat_t
++	if err := unix.Fstat(parentFD, &parentStat); err != nil {
++		return err
++	}
++	if parentStat.Mode&unix.S_IFMT != unix.S_IFDIR || parentStat.Uid != 0 || parentStat.Mode&0022 != 0 {
++		return errors.New("C1 V53 broker parent must be root-owned and not group/world writable")
++	}
++	if err := unix.Fstatat(parentFD, filepath.Base(socketPath), &socketStat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
++		return err
++	}
++	if socketStat.Mode&unix.S_IFMT != unix.S_IFSOCK || socketStat.Uid != 0 ||
++		socketStat.Gid != expectedGroup || socketStat.Mode&0777 != 0660 {
++		return errors.New("C1 V53 broker socket must be a root-owned 0660 socket for receiver primary GID")
++	}
++	return nil
++}
++
++// PublishV53DevContextToV3 is the V51R/V36 publication path with one stronger
++// source contract: the SCM_RIGHTS descriptor must be the exact inode retained
++// by the root supervisor before the receiver started. The receiver never
++// chooses a stage pathname and cannot substitute another same-UID directory.
++func PublishV53DevContextToV3(ctx context.Context, manager *localcontext.Manager,
++	ledgerDir string, conn *net.UnixConn, expectedPID int, expectedUID, expectedGID uint32,
++	supervisorStageFD int, dest string, manifest V15SealedManifest, permit V15OwnerPermit,
++	trustedV15Public ed25519.PublicKey, minimumEpoch, maximumEpoch uint64,
++	record localcontext.Consumption) error {
++	if ctx == nil || manager == nil || conn == nil || supervisorStageFD < 0 ||
++		os.Getuid() != 0 || os.Geteuid() != 0 {
++		return errors.New("V53 DEV requires root supervisor, Manager, accepted peer and retained stage FD")
++	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	if record.Name != manifest.ContextName || record.WorkerID != manifest.WorkerID ||
++		record.SessionID != manifest.SessionID || record.Name == "" {
++		return errors.New("V53 DEV worker/context/session differs from frozen V15 manifest")
++	}
++	// V51R preflight is deliberately before peer data, V40 claim or V36 publish.
++	if err := manager.DevV51Preflight(ctx, manifest.Nonce, record); err != nil {
++		return fmt.Errorf("V51R DEV preclaim owner-scope authorization refused: %w", err)
++	}
++	if err := v41AuthenticatePeerBeforeClaim(conn, expectedPID, expectedUID, expectedGID); err != nil {
++		return fmt.Errorf("V53 DEV refused receiver identity before permit claim: %w", err)
++	}
++	fd, err := receiveV37AuthenticatedStageFD(conn, expectedPID, expectedUID, expectedGID)
++	if err != nil {
++		return fmt.Errorf("V53 DEV refused receiver stage handoff before permit claim: %w", err)
++	}
++	defer unix.Close(fd)
++	var received, retained unix.Stat_t
++	if err := unix.Fstat(fd, &received); err != nil {
++		return err
++	}
++	if err := unix.Fstat(supervisorStageFD, &retained); err != nil {
++		return err
++	}
++	if received.Mode&unix.S_IFMT != unix.S_IFDIR || retained.Mode&unix.S_IFMT != unix.S_IFDIR ||
++		received.Dev != retained.Dev || received.Ino != retained.Ino ||
++		received.Uid != expectedUID || received.Gid != expectedGID || received.Mode&07777 != 0700 ||
++		retained.Uid != expectedUID || retained.Gid != expectedGID || retained.Mode&07777 != 0700 {
++		return errors.New("V53 DEV received FD is not the exact root-supervisor-retained receiver stage inode")
++	}
++	if err := claimV39DurableTestOwnerPermit(ledgerDir, manifest, permit, trustedV15Public, minimumEpoch, maximumEpoch); err != nil {
++		return fmt.Errorf("V53 DEV refused publication before durable V40 permit claim: %w", err)
++	}
++	if err := publishV36RootOwnedSnapshot(fd, expectedUID, expectedGID, dest, manifest); err != nil {
++		return fmt.Errorf("V53 DEV root-owned manifest copy/publication failed after one-time permit claim: %w", err)
++	}
++	observation, stream, err := v51MeasureProtectedPublication(dest, manifest)
++	if err != nil {
++		return fmt.Errorf("V53 DEV published but not V3-admitted; new authorization required: %w", err)
++	}
++	if record.TreeDigest != "" && record.TreeDigest != observation.TreeDigest ||
++		record.StreamDigest != "" && record.StreamDigest != observation.StreamDigest ||
++		record.StreamLength != 0 && record.StreamLength != observation.StreamLength ||
++		record.RegularFileBytes != 0 && record.RegularFileBytes != observation.RegularFileBytes ||
++		record.EntryCount != 0 && record.EntryCount != observation.EntryCount {
++		return errors.New("V53 DEV caller metadata differs from measured root-owned publication")
++	}
++	record.TreeDigestSchema = observation.TreeDigestSchema
++	record.TreeDigest = observation.TreeDigest
++	record.StreamDigest = observation.StreamDigest
++	record.StreamLength = observation.StreamLength
++	record.StreamBytes = stream
++	record.RegularFileBytes = observation.RegularFileBytes
++	record.EntryCount = observation.EntryCount
++	if err := manager.ContextConsumed(ctx, record); err != nil {
++		return fmt.Errorf("V53 DEV published bytes refused by independently authorized V3 scope: %w", err)
++	}
++	return nil
++}
+diff --git a/session/filesync/sealed_publication_v53_filesync_broker_linux_test.go b/session/filesync/sealed_publication_v53_filesync_broker_linux_test.go
+new file mode 100755
+index 0000000..b4dff24
+--- /dev/null
++++ b/session/filesync/sealed_publication_v53_filesync_broker_linux_test.go
+@@ -0,0 +1,626 @@
++//go:build linux && virki_c1c4_dev
++
++package filesync
++
++import (
++	"context"
++	"crypto/ed25519"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"os/exec"
++	"os/user"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/moby/buildkit/session"
++	"github.com/moby/buildkit/util/localcontext"
++	"golang.org/x/sys/unix"
++	"google.golang.org/grpc"
++	"google.golang.org/grpc/credentials/insecure"
++)
++
++const (
++	v53ReceiverUID uint32 = 60024
++	v53SenderUID   uint32 = 60021
++)
++
++type v53DirectCaller struct{ conn *grpc.ClientConn }
++
++func (c *v53DirectCaller) Supports(method string) bool {
++	return method == session.MethodURL(sealedServiceNameV15, sealedMethodV15)
++}
++func (c *v53DirectCaller) Context(ctx context.Context) context.Context { return ctx }
++func (c *v53DirectCaller) Conn() *grpc.ClientConn                      { return c.conn }
++func (c *v53DirectCaller) SharedKey() string                           { return "v53-test-session-key" }
++
++// Negative control: the old V23/V24 check-then-rename-by-path algorithm
++// deterministically exposes an unverified replacement between the final
++// identity check and RENAME_NOREPLACE. This test records the vulnerable RED
++// outcome without weakening the positive V53 supervisor-FD security gates.
++func TestC1V53LegacySameUIDCheckRenameNegativeControl(t *testing.T) {
++	parent := t.TempDir()
++	stagePath := filepath.Join(parent, "stage")
++	if err := os.Mkdir(stagePath, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(stagePath, "app.js"), []byte("SAFE"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	parentFD, err := unix.Open(parent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer unix.Close(parentFD)
++	stageFD, err := unix.Open(stagePath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer unix.Close(stageFD)
++	m := v15PacketManifest()
++	m.Files = []V15FilePin{{Path: "app.js", SHA256: v15Hash([]byte("SAFE")), Size: 4}}
++	m.Bytes = 4
++	m.Digest = v15ManifestDigest(m)
++	if err := verifyV23StageTreeFD(stageFD, m); err != nil {
++		t.Fatal(err)
++	}
++	if err := verifyAndSyncV22Stage(stageFD, m); err != nil {
++		t.Fatal(err)
++	}
++	if err := requireV23StageNameIdentity(parentFD, stageFD, "stage"); err != nil {
++		t.Fatal(err)
++	}
++	// The attacker is a SEPARATE process sharing the test receiver's UID.
++	attack := exec.Command("/bin/sh", "-c",
++		`mv -- "$1" "$1-pinned" && mkdir -m 700 -- "$1" && printf EVIL > "$1/app.js"`,
++		"v53-same-uid-negative-control", stagePath)
++	if out, err := attack.CombinedOutput(); err != nil {
++		t.Fatalf("controlled same-UID rename attack: %v (%s)", err, out)
++	}
++	if err := unix.Renameat2(parentFD, "stage", parentFD, "published", unix.RENAME_NOREPLACE); err != nil {
++		t.Fatal(err)
++	}
++	got, err := os.ReadFile(filepath.Join(parent, "published", "app.js"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != "EVIL" {
++		t.Fatalf("negative control did not trigger transient unsafe publication: %q", got)
++	}
++	if err := verifyV23StageTreeFD(stageFD, m); err != nil {
++		t.Fatalf("verified FD changed unexpectedly: %v", err)
++	}
++	if err := requireV23StageNameIdentity(parentFD, stageFD, "published"); err == nil {
++		t.Fatal("legacy post-publication check did not detect wrong inode")
++	}
++}
++
++func TestC1V53FileSyncToRootBrokerSameUIDStageRace(t *testing.T) {
++	if mode := os.Getenv("VIRKI_V53_CHILD"); mode != "" {
++		v53RunChild(t, mode)
++		return
++	}
++	if os.Getenv("VIRKI_V53_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("V53 DEV requires explicit disposable root supervisor and real nonroot processes")
++	}
++	for _, uid := range []uint32{v53ReceiverUID, v53SenderUID} {
++		if _, err := user.LookupId(strconv.Itoa(int(uid))); err == nil {
++			t.Skipf("V53 synthetic UID %d is already assigned", uid)
++		}
++	}
++	for _, attack := range []string{"during-receive", "after-receive", "during-publication"} {
++		t.Run(attack, func(t *testing.T) { v53RunRootCase(t, attack) })
++	}
++}
++
++func v53RunChild(t *testing.T, mode string) {
++	t.Helper()
++	switch mode {
++	case "grpc-server":
++		if os.Getuid() != int(v53SenderUID) || os.Geteuid() != int(v53SenderUID) {
++			t.Fatal("V53 gRPC sender is not running as the supervisor-pinned sender UID")
++		}
++		req := v15Request(os.Getenv("VIRKI_V53_SOURCE"), "app.js")
++		req.ContextName, req.WorkerID, req.SessionID, req.Nonce = "source", "worker-v53", "sess-source", strings.Repeat("b", 32)
++		snapshot, err := NewLinuxSealedSnapshotV15(context.Background(), req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if got := snapshot.Manifest(); got.Digest != os.Getenv("VIRKI_V53_EXPECTED_MANIFEST") {
++			t.Fatalf("V53 sender snapshot differs from root-pinned manifest: got=%s want=%s manifest=%+v", got.Digest, os.Getenv("VIRKI_V53_EXPECTED_MANIFEST"), got)
++		}
++		listener, err := net.Listen("tcp", "127.0.0.1:0")
++		if err != nil {
++			t.Fatal(err)
++		}
++		server := grpc.NewServer()
++		provider := NewSealedFSSyncProviderV15(snapshot)
++		provider.Register(server)
++		go func() { _ = server.Serve(listener) }()
++		if err := os.WriteFile(os.Getenv("VIRKI_V53_SERVER_READY"), []byte(listener.Addr().String()), 0600); err != nil {
++			t.Fatal(err)
++		}
++		v53WaitForFile(t, os.Getenv("VIRKI_V53_SERVER_STOP"), 30*time.Second)
++		server.GracefulStop()
++		_ = listener.Close()
++	case "receiver":
++		if os.Getuid() != int(v53ReceiverUID) || os.Geteuid() != int(v53ReceiverUID) {
++			t.Fatal("V53 receiver is not running as the supervisor-pinned receiver UID")
++		}
++		var manifest V15SealedManifest
++		var permit V15OwnerPermit
++		v53DecodeEnv(t, "VIRKI_V53_MANIFEST", &manifest)
++		v53DecodeEnv(t, "VIRKI_V53_PERMIT", &permit)
++		public, err := base64.StdEncoding.DecodeString(os.Getenv("VIRKI_V53_PUBLIC"))
++		if err != nil {
++			t.Fatal(err)
++		}
++		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
++		defer cancel()
++		cc, err := grpc.DialContext(ctx, os.Getenv("VIRKI_V53_GRPC_ADDR"),
++			grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer cc.Close()
++		caller := &v53DirectCaller{conn: cc}
++		policy := V24ReceiverCustodyPolicy{
++			RequireUnprivileged: true,
++			ExpectedReceiverUID: v53UintPtr(v53ReceiverUID), ExpectedReceiverGID: v53UintPtr(v53ReceiverUID),
++			ExpectedSenderUID: v53UintPtr(v53SenderUID), ExpectedSenderGID: v53UintPtr(v53SenderUID),
++			ForbiddenPeerUIDs: []uint32{v53SenderUID}, PrivateTempDir: os.Getenv("TMPDIR"),
++		}
++		barrier := func(ready, release string) func() error {
++			return func() error {
++				if err := os.WriteFile(ready, []byte("ready"), 0600); err != nil {
++					return err
++				}
++				return v53WaitForMarker(release, 10*time.Second)
++			}
++		}
++		var before, after func() error
++		switch os.Getenv("VIRKI_V53_ATTACK") {
++		case "during-receive":
++			before = barrier(os.Getenv("VIRKI_V53_READY"), os.Getenv("VIRKI_V53_CONTINUE"))
++		case "after-receive":
++			after = barrier(os.Getenv("VIRKI_V53_AFTER_READY"), os.Getenv("VIRKI_V53_AFTER_CONTINUE"))
++		case "during-publication":
++			before = barrier(os.Getenv("VIRKI_V53_READY"), os.Getenv("VIRKI_V53_CONTINUE"))
++		}
++		ledger := NewV15LocalReplayLedger(7)
++		opt := FSSendRequestOpt{Name: manifest.ContextName, FollowPaths: []string{"app.js"}}
++		if err := fssyncSealedV53DevWithHooks(ctx, caller, opt, manifest, permit,
++			ed25519.PublicKey(public), ledger, 3, os.Getenv("VIRKI_V53_BROKER_SOCKET"), policy, before, after); err != nil {
++			t.Fatal(err)
++		}
++	case "attacker":
++		stagePath := os.Getenv("VIRKI_V53_STAGE_PATH")
++		procFD := os.Getenv("VIRKI_V53_PROC_FD")
++		destPath := os.Getenv("VIRKI_V53_DEST_PATH")
++		seen := os.Getenv("VIRKI_V53_SEEN")
++		attack := os.Getenv("VIRKI_V53_ATTACK")
++		ready := os.Getenv("VIRKI_V53_READY")
++		if attack == "after-receive" {
++			ready = os.Getenv("VIRKI_V53_AFTER_READY")
++		}
++		v53WaitForFile(t, ready, 10*time.Second)
++		attempt := func() bool {
++			// Same-UID attacker tries to replace the supervisor stage pathname.
++			if err := os.Rename(stagePath, stagePath+"-attacker-moved"); err == nil {
++				_ = os.Mkdir(stagePath, 0700)
++				_ = os.WriteFile(filepath.Join(stagePath, "app.js"), []byte("EVIL"), 0600)
++				_ = os.WriteFile(seen, []byte("stage pathname replaced"), 0600)
++				return true
++			}
++			if err := os.WriteFile(filepath.Join(stagePath, "app.js"), []byte("EVIL"), 0600); err == nil {
++				_ = os.WriteFile(seen, []byte("stage content modified"), 0600)
++				return true
++			}
++			// Same-UID procfs descriptor theft must fail after PR_SET_DUMPABLE=0.
++			if f, err := os.Open(procFD); err == nil {
++				_ = f.Close()
++				_ = os.WriteFile(seen, []byte("receiver FD stolen through procfs"), 0600)
++				return true
++			}
++			// The final root-only publication must never be readable/writable by this UID.
++			if f, err := os.Open(filepath.Join(destPath, "app.js")); err == nil {
++				_ = f.Close()
++				_ = os.WriteFile(seen, []byte("protected publication visible"), 0600)
++				return true
++			}
++			if err := os.WriteFile(filepath.Join(destPath, "app.js"), []byte("EVIL"), 0600); err == nil {
++				_ = os.WriteFile(seen, []byte("protected publication modified"), 0600)
++				return true
++			}
++			return false
++		}
++		if attack != "during-publication" {
++			if attempt() {
++				return
++			}
++			if attack == "during-receive" {
++				_ = os.WriteFile(os.Getenv("VIRKI_V53_CONTINUE"), []byte("continue"), 0600)
++			}
++			if attack == "after-receive" {
++				_ = os.WriteFile(os.Getenv("VIRKI_V53_AFTER_CONTINUE"), []byte("continue"), 0600)
++			}
++			return
++		}
++		_ = os.WriteFile(os.Getenv("VIRKI_V53_CONTINUE"), []byte("continue"), 0600)
++		for {
++			if _, err := os.Stat(os.Getenv("VIRKI_V53_STOP")); err == nil {
++				return
++			}
++			if attempt() {
++				return
++			}
++			time.Sleep(time.Millisecond)
++		}
++	default:
++		t.Fatalf("unknown V53 child mode %q", mode)
++	}
++}
++
++func v53RunRootCase(t *testing.T, attack string) {
++	t.Helper()
++	base, err := os.MkdirTemp("/var/tmp", "virki-v53-root-broker-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	var stage *V53SupervisorStage
++	var receiver, attacker, server *exec.Cmd
++	var listener *net.UnixListener
++	var conn *net.UnixConn
++	t.Cleanup(func() {
++		if conn != nil {
++			_ = conn.Close()
++		}
++		if listener != nil {
++			_ = listener.Close()
++		}
++		for _, cmd := range []*exec.Cmd{receiver, attacker, server} {
++			if cmd != nil && cmd.ProcessState == nil {
++				_ = cmd.Process.Kill()
++				_ = cmd.Wait()
++			}
++		}
++		if stage != nil {
++			_ = stage.Cleanup()
++			_ = stage.Close()
++		}
++		_ = os.RemoveAll(base)
++	})
++	if err := os.Chmod(base, 0711); err != nil {
++		t.Fatal(err)
++	}
++	paths := map[string]string{}
++	for _, name := range []string{"protected", "stage-parent", "broker-dir", "source", "server-dir", "ledger", "private-tmp", "race-signals"} {
++		paths[name] = filepath.Join(base, name)
++		if err := os.Mkdir(paths[name], 0700); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if err := os.Mkdir(v40TrustDir(paths["ledger"]), 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(paths["broker-dir"], 0711); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(paths["source"], int(v53SenderUID), int(v53SenderUID)); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(paths["server-dir"], int(v53SenderUID), int(v53SenderUID)); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(paths["private-tmp"], int(v53ReceiverUID), int(v53ReceiverUID)); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(paths["race-signals"], int(v53ReceiverUID), int(v53ReceiverUID)); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(paths["private-tmp"], 0700); err != nil {
++		t.Fatal(err)
++	}
++	const content = "V53 physical sealed FileSync bytes; no receiver pathname publication\n"
++	if err := os.WriteFile(filepath.Join(paths["source"], "app.js"), []byte(content), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(filepath.Join(paths["source"], "app.js"), int(v53SenderUID), int(v53SenderUID)); err != nil {
++		t.Fatal(err)
++	}
++	request := v15Request(paths["source"], "app.js")
++	request.ContextName, request.WorkerID, request.SessionID, request.Nonce = "source", "worker-v53", "sess-source", strings.Repeat("b", 32)
++	snapshot, err := NewLinuxSealedSnapshotV15(context.Background(), request)
++	if err != nil {
++		t.Fatal(err)
++	}
++	manifest := snapshot.Manifest()
++	permitPub, permitPriv, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	permit := V15OwnerPermit{Domain: V15OwnerDomain, ApprovalID: "v53-test-only", ManifestDigest: manifest.Digest,
++		WorkerID: manifest.WorkerID, SessionID: manifest.SessionID, ContextName: manifest.ContextName,
++		Nonce: manifest.Nonce, Epoch: 7, ExpiresUnix: time.Now().Add(time.Hour).Unix()}
++	permit.Signature = ed25519.Sign(permitPriv, v15PermitBytes(permit))
++	macKey := make([]byte, 32)
++	if _, err := rand.Read(macKey); err != nil {
++		t.Fatal(err)
++	}
++	for path, data := range map[string][]byte{
++		filepath.Join(paths["ledger"], v40LogName):                     nil,
++		filepath.Join(v40TrustDir(paths["ledger"]), v40KeyName):        macKey,
++		filepath.Join(v40TrustDir(paths["ledger"]), v40CheckpointName): v40InitialCheckpoint(paths["ledger"], permitPub, macKey),
++	} {
++		mode := os.FileMode(0600)
++		if filepath.Base(path) == v40KeyName {
++			mode = 0400
++		}
++		if err := os.WriteFile(path, data, mode); err != nil {
++			t.Fatal(err)
++		}
++		f, err := os.Open(path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := f.Sync(); err != nil {
++			t.Fatal(err)
++		}
++		_ = f.Close()
++	}
++	for _, dir := range []string{paths["ledger"], v40TrustDir(paths["ledger"])} {
++		fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := unix.Fsync(fd); err != nil {
++			t.Fatal(err)
++		}
++		_ = unix.Close(fd)
++	}
++	stage, err = CreateV53SupervisorStage(paths["stage-parent"], v53ReceiverUID, v53ReceiverUID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := stage.Verify(v53ReceiverUID, v53ReceiverUID); err != nil {
++		t.Fatal(err)
++	}
++	stagePath := filepath.Join(paths["stage-parent"], stage.Name)
++	dest := filepath.Join(paths["protected"], "published-source")
++	// Independently measure the expected owner context before any sender data.
++	reference := filepath.Join(paths["protected"], "reference")
++	if err := os.Mkdir(reference, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(reference, "app.js"), []byte(content), 0600); err != nil {
++		t.Fatal(err)
++	}
++	expected, _, err := BuildLocalContextStream(reference, "source", MaxLocalContextStreamBytes)
++	if err != nil {
++		t.Fatal(err)
++	}
++	intent, err := localcontext.NewExporterIntent("image", 0, map[string]string{"name": "127.0.0.1:5000/virki/v53:dev"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	identities, trees, sessions := map[string]string{}, map[string]string{}, map[string]string{}
++	for _, name := range localcontext.RequiredContextNames() {
++		identities[name], trees[name], sessions[name] = "ctxid-"+name, expected.TreeDigest, "sess-"+name
++	}
++	auth := localcontext.Authorization{Token: "v53-test-scope", Generation: manifest.Nonce, WorkerID: manifest.WorkerID,
++		ContextIdentities: identities, ContextTreeDigestSchema: expected.TreeDigestSchema,
++		ContextTreeDigests: trees, ContextSessionIDsV8: sessions, ExporterPolicy: intent,
++		ExpectedImage: localcontext.ImageDescriptor{MediaType: "application/vnd.oci.image.manifest.v1+json", Digest: "sha256:" + strings.Repeat("b", 64), Size: 100},
++		ExpiresAt:     time.Now().Add(time.Hour)}
++	owner := &v51DEVScope{auth: auth}
++	manager, err := localcontext.NewManager(owner, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, scope, err := manager.BeginSolve(context.Background(), localcontext.Binding{JobID: "job-v53", Role: "runtime", Nonce: manifest.Nonce,
++		ApprovalID: "v53-test-scope", ApprovalEnvelope: base64.StdEncoding.EncodeToString([]byte("TEST ONLY; NO C4 AUTHORITY")), Exporter: intent})
++	if err != nil {
++		t.Fatal(err)
++	}
++	_ = scope
++
++	// Real gRPC FileSync sender runs under a distinct nonroot UID.
++	helper, err := os.Executable()
++	if err != nil {
++		t.Fatal(err)
++	}
++	helperCopy := filepath.Join(base, "v53-helper")
++	in, err := os.Open(helper)
++	if err != nil {
++		t.Fatal(err)
++	}
++	out, err := os.OpenFile(helperCopy, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0555)
++	if err != nil {
++		_ = in.Close()
++		t.Fatal(err)
++	}
++	if _, err := io.Copy(out, in); err != nil {
++		t.Fatal(err)
++	}
++	_ = in.Close()
++	if err := out.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(helperCopy, 0555); err != nil {
++		t.Fatal(err)
++	}
++	serverReady := filepath.Join(paths["server-dir"], "ready")
++	serverStop := filepath.Join(paths["server-dir"], "stop")
++	server = exec.Command(helperCopy, "-test.run=^TestC1V53FileSyncToRootBrokerSameUIDStageRace$")
++	server.Env = []string{"PATH=/usr/bin:/bin", "VIRKI_V53_CHILD=grpc-server", "VIRKI_V53_SOURCE=" + paths["source"],
++		"VIRKI_V53_EXPECTED_MANIFEST=" + manifest.Digest, "VIRKI_V53_SERVER_READY=" + serverReady, "VIRKI_V53_SERVER_STOP=" + serverStop}
++	server.Stdout, server.Stderr = os.Stdout, os.Stderr
++	server.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: v53SenderUID, Gid: v53SenderUID, Groups: []uint32{}}, Pdeathsig: syscall.SIGKILL}
++	if err := server.Start(); err != nil {
++		t.Fatal(err)
++	}
++	grpcAddr := string(v53WaitForFile(t, serverReady, 10*time.Second))
++
++	// Root broker socket is group-accessible only to the receiver primary GID.
++	socket := filepath.Join(paths["broker-dir"], "v53.sock")
++	listener, err = net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := v50ArmPasscredBeforeAccept(listener); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(socket, 0, int(v53ReceiverUID)); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(socket, 0660); err != nil {
++		t.Fatal(err)
++	}
++
++	ready := filepath.Join(paths["race-signals"], "ready")
++	cont := filepath.Join(paths["race-signals"], "continue")
++	afterReady := filepath.Join(paths["race-signals"], "after-ready")
++	afterContinue := filepath.Join(paths["race-signals"], "after-continue")
++	stop := filepath.Join(paths["race-signals"], "stop")
++	seen := filepath.Join(paths["race-signals"], "attacker-seen")
++	manifestJSON, _ := json.Marshal(manifest)
++	permitJSON, _ := json.Marshal(permit)
++	receiver = exec.Command(helperCopy, "-test.run=^TestC1V53FileSyncToRootBrokerSameUIDStageRace$")
++	receiver.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + paths["private-tmp"], "VIRKI_V53_CHILD=receiver",
++		"VIRKI_V53_MANIFEST=" + base64.StdEncoding.EncodeToString(manifestJSON),
++		"VIRKI_V53_PERMIT=" + base64.StdEncoding.EncodeToString(permitJSON),
++		"VIRKI_V53_PUBLIC=" + base64.StdEncoding.EncodeToString(permitPub),
++		"VIRKI_V53_GRPC_ADDR=" + grpcAddr, "VIRKI_V53_BROKER_SOCKET=" + socket,
++		"VIRKI_V53_ATTACK=" + attack, "VIRKI_V53_READY=" + ready, "VIRKI_V53_CONTINUE=" + cont,
++		"VIRKI_V53_AFTER_READY=" + afterReady, "VIRKI_V53_AFTER_CONTINUE=" + afterContinue}
++	receiver.Stdout, receiver.Stderr = os.Stdout, os.Stderr
++	receiver.ExtraFiles = []*os.File{stage.Stage}
++	receiver.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: v53ReceiverUID, Gid: v53ReceiverUID, Groups: []uint32{}}, Pdeathsig: syscall.SIGKILL}
++	if err := receiver.Start(); err != nil {
++		t.Fatal(err)
++	}
++
++	attacker = exec.Command(helperCopy, "-test.run=^TestC1V53FileSyncToRootBrokerSameUIDStageRace$")
++	attacker.Env = []string{"PATH=/usr/bin:/bin", "VIRKI_V53_CHILD=attacker", "VIRKI_V53_ATTACK=" + attack,
++		"VIRKI_V53_STAGE_PATH=" + stagePath, "VIRKI_V53_PROC_FD=/proc/" + strconv.Itoa(receiver.Process.Pid) + "/fd/3",
++		"VIRKI_V53_DEST_PATH=" + dest, "VIRKI_V53_SEEN=" + seen, "VIRKI_V53_READY=" + ready,
++		"VIRKI_V53_CONTINUE=" + cont, "VIRKI_V53_AFTER_READY=" + afterReady,
++		"VIRKI_V53_AFTER_CONTINUE=" + afterContinue, "VIRKI_V53_STOP=" + stop}
++	attacker.Stdout, attacker.Stderr = os.Stdout, os.Stderr
++	attacker.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: v53ReceiverUID, Gid: v53ReceiverUID, Groups: []uint32{}}, Pdeathsig: syscall.SIGKILL}
++	if err := attacker.Start(); err != nil {
++		t.Fatal(err)
++	}
++
++	brokerResult := make(chan error, 1)
++	go func() {
++		c, err := listener.AcceptUnix()
++		if err != nil {
++			brokerResult <- err
++			return
++		}
++		conn = c
++		record := localcontext.Consumption{Name: manifest.ContextName, WorkerID: manifest.WorkerID,
++			SessionID: manifest.SessionID, Generation: manifest.Nonce,
++			VertexDigest: "sha256:" + strings.Repeat("c", 64), SnapshotID: "snap-v53", VertexOutputIndex: 0}
++		err = PublishV53DevContextToV3(ctx, manager, paths["ledger"], c, receiver.Process.Pid,
++			v53ReceiverUID, v53ReceiverUID, int(stage.Stage.Fd()), dest, manifest, permit, permitPub, 7, 8, record)
++		ack := byte('O')
++		if err != nil {
++			ack = 'E'
++		}
++		_, ackErr := c.Write([]byte{ack})
++		brokerResult <- errors.Join(err, ackErr)
++	}()
++
++	if err := receiver.Wait(); err != nil {
++		t.Fatalf("V53 receiver/FileSync child failed: %v", err)
++	}
++	if err := <-brokerResult; err != nil {
++		t.Fatalf("V53 root broker rejected physical FileSync stage: %v", err)
++	}
++	if err := os.WriteFile(stop, []byte("stop"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := attacker.Wait(); err != nil {
++		t.Fatalf("V53 same-UID attacker child failed: %v", err)
++	}
++	if err := os.WriteFile(serverStop, []byte("stop"), 0644); err != nil {
++		t.Fatal(err)
++	}
++	if err := server.Wait(); err != nil {
++		t.Fatalf("V53 physical gRPC sender child failed: %v", err)
++	}
++	if _, err := os.Stat(seen); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("same-UID attacker accessed or changed stage/publication: %v", err)
++	}
++	if err := stage.Verify(v53ReceiverUID, v53ReceiverUID); err != nil {
++		t.Fatalf("root supervisor stage identity changed: %v", err)
++	}
++	got, err := os.ReadFile(filepath.Join(dest, "app.js"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != content {
++		t.Fatalf("published content differs from manifest: %q", got)
++	}
++	if _, _, _, err := scope.CausalInputs(); err == nil {
++		t.Fatal("one V53 context unexpectedly completed a four-context TEST scope")
++	}
++	log, err := os.ReadFile(filepath.Join(paths["ledger"], v40LogName))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if bytes := strings.Count(string(log), "\n"); bytes != 1 {
++		t.Fatalf("V53 durable V40 claims=%d want=1", bytes)
++	}
++}
++
++func v53WaitForMarker(path string, timeout time.Duration) error {
++	deadline := time.Now().Add(timeout)
++	for time.Now().Before(deadline) {
++		if _, err := os.Stat(path); err == nil {
++			return nil
++		} else if !errors.Is(err, os.ErrNotExist) {
++			return err
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	return fmt.Errorf("V53 marker %s timed out", filepath.Base(path))
++}
++
++func v53WaitForFile(t *testing.T, path string, timeout time.Duration) []byte {
++	deadline := time.Now().Add(timeout)
++	for time.Now().Before(deadline) {
++		if data, err := os.ReadFile(path); err == nil {
++			return data
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	if t != nil {
++		t.Fatalf("timed out waiting for %s", path)
++	}
++	return nil
++}
++
++func v53DecodeEnv(t *testing.T, name string, target any) {
++	t.Helper()
++	data, err := base64.StdEncoding.DecodeString(os.Getenv(name))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := json.Unmarshal(data, target); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func v53UintPtr(v uint32) *uint32 { return &v }

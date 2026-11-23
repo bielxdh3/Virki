@@ -265,8 +265,34 @@ jobs:
             -run '^TestDevV51PreflightV52DistinctPermitNonceRequiresPendingGroup$' \
             | tee "$RUNNER_TEMP/issue90-v52-preclaim-group-nonce-regression.log"
           ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v52-preclaim-group-nonce-regression.log"
+          # V53 is strictly post-V51R and post-V52/unique UID; historical
+          # patches, V51R and V52 patch/tree receipts remain immutable. The
+          # new receiver uses actual gRPC FileSync into an FD rooted in an
+          # independent supervisor's 0700 parent. Only the V36 root broker
+          # publishes bytes, so a same-UID stage rename cannot expose them.
+          v53="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v52-to-v53-root-fd-filesync-dev.patch"
+          echo "6fadbf84f7b98d953c5fcc1696da2a600c684732058c83c57b79d3424c778f72  $v53" | sha256sum --check
+          git -C "$scratch" apply --cached --check "$v53"
+          git -C "$scratch" apply --cached "$v53"
+          test "$(git -C "$scratch" write-tree)" = c399a293604e2a55d695c5f73b89a2bbc7906e35
+          git -C "$scratch" checkout-index -f --all
+          "$toolchain/go/bin/go" test -mod=vendor -tags virki_c1c4_dev \
+            -race -count=1 -timeout 180s -v ./session/filesync \
+            -run '^TestC1V53LegacySameUIDCheckRenameNegativeControl$' \
+            | tee "$RUNNER_TEMP/issue90-v53-red-negative-control.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v53-red-negative-control.log"
+          grep -Fq -- '--- PASS: TestC1V53LegacySameUIDCheckRenameNegativeControl (' "$RUNNER_TEMP/issue90-v53-red-negative-control.log"
+          sudo env -i PATH=/usr/bin:/bin HOME=/root GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
+            VIRKI_V53_RUN_ROOT_FIXTURE=1 VIRKI_V52_RUN_ROOT_FIXTURE=1 \
+            "$toolchain/go/bin/go" test -mod=vendor -tags virki_c1c4_dev \
+            -race -count=1 -timeout 180s -v ./session/filesync \
+            -run '^TestC1V(52FourProtectedContextsOneSolve|53FileSyncToRootBrokerSameUIDStageRace)$' \
+            | tee "$RUNNER_TEMP/issue90-v53-actual-filesync-four-physical-root.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v53-actual-filesync-four-physical-root.log"
+          grep -Fq -- '--- PASS: TestC1V52FourProtectedContextsOneSolve (' "$RUNNER_TEMP/issue90-v53-actual-filesync-four-physical-root.log"
+          grep -Fq -- '--- PASS: TestC1V53FileSyncToRootBrokerSameUIDStageRace (' "$RUNNER_TEMP/issue90-v53-actual-filesync-four-physical-root.log"
           # The build-tag is absent in normal BuildKit. All normal packages
-          # must keep compiling with the V52 extra gate left at its zero value.
+          # must keep compiling with the V53 extra gate left at its zero value.
           "$toolchain/go/bin/go" test -mod=vendor -run '^$' ./session/filesync ./util/localcontext ./source/local ./solver/llbsolver ./cmd/buildkitd/config ./cmd/buildkitd
           "$toolchain/go/bin/go" vet -mod=vendor -tags virki_c1c4_dev ./session/filesync ./util/localcontext ./cmd/buildkitd/config ./cmd/buildkitd
 
