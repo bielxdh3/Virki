@@ -24,3 +24,4 @@ cb02a52d42bcba6d31c5c4e3520c787ebe9c752151fee6dc3e806c146dfcff22  docs/security/
 d3b8743900bac1de7a1f28fecd5927d0d4df6117b134d987613abc8d7003baed  docs/security/experiments/buildkit-v0.34.1-c1-v46-cross-process-crash-fence-dev-only.patch
 c411f76f15e0a73871030b264280cbb641e54f3faa829010c89957a26ab88465  docs/security/experiments/buildkit-v0.34.1-c1-v47-recovery-observer-no-xdev-dev-only.patch
 a9497fd6f51c0597f87fb3a4ab8f33cfe1b2fc471033b98cab486a872e64cfc6  docs/security/experiments/buildkit-v0.34.1-c1-v48-final-fence-fsync-recovery-dev-only.patch
+830f1b9d6dc433e1001ea9b5174f52590877e3b210b06cda01a2ad27c88550d4  docs/security/experiments/buildkit-v0.34.1-c1-v49-authenticated-sender-credentials-dev-only.patch

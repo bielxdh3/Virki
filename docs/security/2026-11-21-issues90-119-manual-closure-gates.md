@@ -174,6 +174,21 @@ the grant to remain active; it passed (GREEN) alongside the adjacent
 revocation, connection-deletion and adapter tests. No owner identity,
 Cloudflare configuration or production database was modified.
 
+**BuildKit V49 authenticated FD sender (new incremental DEV-only patch):**
+The real Linux `SO_PEERCRED` check could accept a socket originally
+connected by a now-dead approved PID, while a different process that inherited
+the socket delivered the `SCM_RIGHTS` FD. Before V49, that sender could
+also consume a V40 one-use DEV permit prior to the receiver admitting the FD.
+A new Go regression reproduced both defects against V48 (RED). V49 requires
+kernel-supplied per-message `SCM_CREDENTIALS`, verifies sender PID/UID/GID,
+and moves the durable claim **after** credential/FD admission but **before**
+publication. V37/V39/V49 tests pass with Go race instrumentation, the replay
+validates **27 immutable SHA/tree stages V23–V49**, and V23–V48 files were not
+modified. See `docs/security/experiments/issue90-v49-authenticated-sender-credentials.md`.
+Actual Linux production custody, pidfd lifecycle authority, C4 real owner
+signatures and independent anti-rollback witness remain unproven and are not
+conflated with this DEV proof.
+
 ## Fourth PR after merges
 
 ### Incremental DEV-only V42 evidence (PR #141)
