@@ -457,6 +457,47 @@ test("private GHCR images publish only after exact main-push builds pass on both
   assert.doesNotMatch(workflow, /uses: actions\/(?:checkout|setup-node)@v/u);
 });
 
+test("main-push image attestations bind both published digests to the exact hosted workflow", () => {
+  const publisher = workflow.match(/\n {2}production-images:\r?\n([\s\S]*?)(?=\n {2}[a-z][a-z-]*:\r?\n|$)/u)?.[1] ?? "";
+  assert.ok(publicationNeedsAreSafe(workflow));
+  assert.match(publisher, /permissions:\s+contents: read\s+packages: write\s+id-token: write\s+attestations: write/u);
+  assert.equal((workflow.match(/^\s+id-token: write\s*$/gmu) ?? []).length, 1);
+  assert.equal((workflow.match(/^\s+attestations: write\s*$/gmu) ?? []).length, 1);
+  const publish = publisher.indexOf("name: Publish tested private GHCR images and record exact manifest digests");
+  const runtime = publisher.indexOf("name: Attest published runtime image");
+  const migrator = publisher.indexOf("name: Attest published migrator image");
+  const verify = publisher.indexOf("name: Verify published image attestations");
+  const evidence = publisher.indexOf("name: Store exact-run image digests in private GHCR evidence");
+  assert.ok(publish >= 0 && publish < runtime && runtime < migrator && migrator < verify && verify < evidence);
+  const stages = publisher.slice(publish, evidence);
+  assert.doesNotMatch(stages, /^ {8}(?:if|continue-on-error):/mu);
+  assert.match(stages, /id: publish-images/u);
+  assert.match(stages, /printf 'runtime_digest=%s\\nmigrator_digest=%s\\n' "\$runtime_digest" "\$migrator_digest" >> "\$GITHUB_OUTPUT"/u);
+  for (const [name, start, end] of [["runtime", runtime, migrator], ["migrator", migrator, verify]]) {
+    const step = publisher.slice(start, end);
+    assert.match(step, /uses: actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6/u);
+    assert.ok(step.includes("subject-name: ghcr.io/bielxdh3/virki-" + name));
+    assert.ok(step.includes("subject-digest: ${{ steps.publish-images.outputs." + name + "_digest }}"));
+    assert.match(step, /push-to-registry: false/u);
+  }
+  const verification = publisher.slice(verify, evidence);
+  for (const requirement of [
+    'RUNTIME_DIGEST: ${{ steps.publish-images.outputs.runtime_digest }}',
+    'MIGRATOR_DIGEST: ${{ steps.publish-images.outputs.migrator_digest }}',
+    'gh attestation verify "oci://$image@$digest"',
+    '--repo bielxdh3/Virki',
+    '--signer-workflow bielxdh3/Virki/.github/workflows/ci.yml',
+    '--source-digest "$GITHUB_SHA"',
+    '--signer-digest "$GITHUB_SHA"',
+    '--source-ref refs/heads/main',
+    '--deny-self-hosted-runners',
+    '--predicate-type https://slsa.dev/provenance/v1',
+    'verify_image ghcr.io/bielxdh3/virki-runtime "$RUNTIME_DIGEST"',
+    'verify_image ghcr.io/bielxdh3/virki-migrator "$MIGRATOR_DIGEST"'
+  ]) assert.ok(verification.includes(requirement), requirement);
+  assert.match(verification, /set -euo pipefail/u);
+});
+
 test("GHCR publication requires successful audit and physical recovery PG18 jobs in GitHub Actions needs closure", () => {
   assert.equal(publicationNeedsAreSafe(workflow), true, "all mandatory audit and recovery jobs must complete successfully before GHCR publication");
 

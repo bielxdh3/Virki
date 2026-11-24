@@ -533,6 +533,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -591,6 +593,7 @@ jobs:
         run: node scripts/production-migrator-smoke.mjs
 
       - name: Publish tested private GHCR images and record exact manifest digests
+        id: publish-images
         env:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -623,6 +626,44 @@ jobs:
           printf 'revision=%s\nrun_id=%s\nplatform=linux/%s\nruntime_digest=%s\nmigrator_digest=%s\n' \
             "$ACCEPTED_SHA" "$ACCEPTED_RUN_ID" "$EXPECTED_ARCH" "$runtime_digest" "$migrator_digest" \
             > "$RUNNER_TEMP/virki-production-images.manifest"
+          printf 'runtime_digest=%s\nmigrator_digest=%s\n' "$runtime_digest" "$migrator_digest" >> "$GITHUB_OUTPUT"
+
+      # Owner-approved public provenance metadata; image contents remain private.
+      - name: Attest published runtime image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/bielxdh3/virki-runtime
+          subject-digest: ${{ steps.publish-images.outputs.runtime_digest }}
+          push-to-registry: false
+
+      - name: Attest published migrator image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/bielxdh3/virki-migrator
+          subject-digest: ${{ steps.publish-images.outputs.migrator_digest }}
+          push-to-registry: false
+
+      - name: Verify published image attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_DIGEST: ${{ steps.publish-images.outputs.runtime_digest }}
+          MIGRATOR_DIGEST: ${{ steps.publish-images.outputs.migrator_digest }}
+        run: |
+          set -euo pipefail
+          verify_image() {
+            local image="$1" digest="$2"
+            [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+            gh attestation verify "oci://$image@$digest" \
+              --repo bielxdh3/Virki \
+              --signer-workflow bielxdh3/Virki/.github/workflows/ci.yml \
+              --source-digest "$GITHUB_SHA" \
+              --signer-digest "$GITHUB_SHA" \
+              --source-ref refs/heads/main \
+              --deny-self-hosted-runners \
+              --predicate-type https://slsa.dev/provenance/v1
+          }
+          verify_image ghcr.io/bielxdh3/virki-runtime "$RUNTIME_DIGEST"
+          verify_image ghcr.io/bielxdh3/virki-migrator "$MIGRATOR_DIGEST"
 
       - name: Store exact-run image digests in private GHCR evidence
         env:
