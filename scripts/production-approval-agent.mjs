@@ -2,7 +2,7 @@
 // only after Virki's first installation, ingress cutover and GHCR credentials
 // have been verified. Invoked by a non-overlapping, owner-only systemd timer.
 import { spawnSync } from "node:child_process";
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -78,10 +78,25 @@ function readState(file) {
   }
 }
 
-function writeState(file, state) {
+export function writeDurableApprovalState(file, state, sync = fsyncSync) {
   const temporary = file + ".tmp-" + process.pid;
-  writeFileSync(temporary, JSON.stringify(state) + "\n", { mode: 0o600, flag: "wx" });
-  renameSync(temporary, file);
+  const directoryFd = openSync(path.dirname(file), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  let temporaryFd;
+  try {
+    temporaryFd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    writeFileSync(temporaryFd, JSON.stringify(state) + "\n");
+    // Neither an atomic rename nor a close makes the attempt durable after power loss.
+    sync(temporaryFd);
+    closeSync(temporaryFd);
+    temporaryFd = undefined;
+    renameSync(temporary, file);
+    sync(directoryFd);
+  } finally {
+    if (temporaryFd !== undefined) closeSync(temporaryFd);
+    closeSync(directoryFd);
+    // An ambiguous write or rename deliberately retains its temporary file.
+    // The durable outer lock blocks retry until manual reconciliation.
+  }
 }
 
 function validateStateLocation(file) {
@@ -172,32 +187,41 @@ async function run() {
 
   // Write before any mutation. A failed or interrupted attempt is latched and
   // cannot rerun automatically; recovery requires owner/operator review.
-  writeState(stateFile, { sha: pointer.source_commit, status: "attempted" });
+  writeDurableApprovalState(stateFile, { sha: pointer.source_commit, status: "attempted" });
   try {
     exec("npm", ["run", "deploy:prod"]);
     exec("npm", ["run", "health:prod", "--", "--expected", pointer.source_commit]);
     if (demanageContainers(config) !== before) {
       throw new Error("deManage container continuity check failed.");
     }
-    writeState(stateFile, { sha: pointer.source_commit, status: "success" });
+    writeDurableApprovalState(stateFile, { sha: pointer.source_commit, status: "success" });
     process.stdout.write("Virki deployment and local health checks succeeded at " + pointer.source_commit + ".\n");
   } catch {
-    writeState(stateFile, { sha: pointer.source_commit, status: "failed" });
+    writeDurableApprovalState(stateFile, { sha: pointer.source_commit, status: "failed" });
     throw new Error("Production deploy or health check failed. Agent latched; manual recovery required.");
   }
 }
 
-export async function withExclusiveAgentLock(stateFile, action) {
+export async function withExclusiveAgentLock(stateFile, action, sync = fsyncSync) {
   validateStateLocation(stateFile);
-  // 'wx' is an atomic O_EXCL create. A crash leaves the lock as a deliberate
-  // fail-closed manual-recovery sentinel, rather than allowing a second deploy.
+  // O_EXCL prevents concurrent attempts. Persist both its inode and directory
+  // entry before any action so a crash cannot silently remove the recovery latch.
   const lockFile = stateFile + ".lock";
   const fd = openSync(lockFile, "wx", 0o600);
+  let directoryFd;
   try {
-    return await action();
+    sync(fd);
+    directoryFd = openSync(path.dirname(stateFile), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    sync(directoryFd);
+    const result = await action();
+    // A failed/uncertain attempt retains the lock for manual reconciliation.
+    // Normal completion removes it only after the action's durable state write.
+    unlinkSync(lockFile);
+    sync(directoryFd);
+    return result;
   } finally {
     closeSync(fd);
-    unlinkSync(lockFile);
+    if (directoryFd !== undefined) closeSync(directoryFd);
   }
 }
 
