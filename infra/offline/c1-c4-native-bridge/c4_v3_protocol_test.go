@@ -275,6 +275,13 @@ func TestV3SignedReceiptBoundToRequest(t *testing.T) {
 		edit func(*RequestFrame)
 	}{
 		{"other job", func(r *RequestFrame) { copy(r.JobID[:], "another-job") }},
+		// Each build-identity claim must independently bind the signed C4
+		// candidate receipt to the approved source, plan and executable policy.
+		// These are defense-in-depth regressions for checks already enforced in
+		// VerifyV3CandidateReceipt, not evidence of a previously accepted swap.
+		{"other source commit", func(r *RequestFrame) { copy(r.SourceCommit[:], strings.Repeat("b", 40)) }},
+		{"other build plan", func(r *RequestFrame) { copy(r.BuildPlanSHA256[:], strings.Repeat("b", 64)) }},
+		{"other executable policy", func(r *RequestFrame) { copy(r.ExecutablePolicySHA256[:], strings.Repeat("b", 64)) }},
 		{"other worker", func(r *RequestFrame) { copy(r.SessionID[:], "other-worker") }},
 		{"other scope", func(r *RequestFrame) { copy(r.ScopeToken[:], strings.Repeat("b", 64)) }},
 		{"other evidence", func(r *RequestFrame) { copy(r.TranscriptSHA256[:], strings.Repeat("b", 64)) }},
