@@ -8,7 +8,7 @@ The **Authorize Virki production release** workflow appears under **Actions** on
 
 A separate agent on the native Linux production operator host polls that pointer. It only operates if `VIRKI_AUTOMATED_DEPLOY_ENABLED=true`, a first-install marker and active Virki release exist, the pinned SSH host is reachable, and deManage containers are running. The agent fast-forwards its **clean, dedicated** `main` operator checkout to the exact approved revision, verifies the official production preflight (including GHCR evidence and reviewed SARIF), runs `npm run deploy:prod`, checks `npm run health:prod` and compares deManage container names. It records success only after these checks.
 
-If a deployment is interrupted or fails, the agent stores `attempted` or `failed` and **never retries automatically**. A human must investigate production maintenance, backup integrity, schema state and health before resetting the owner-only state. Do not remove or edit the state to defeat this protection.
+If a deployment is interrupted or fails, the agent stores `attempted` or `failed` and **never retries automatically**. The owner-only `.lock` is synced before running and deliberately retained after any error, including an uncertain preflight or state write; investigate the lock together with the persisted state, backup integrity, schema state and health before manual recovery. Do not blindly remove the lock or edit the state to defeat this protection.
 
 ## One-time provisioning (not automated and not yet completed)
 
