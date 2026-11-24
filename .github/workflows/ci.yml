@@ -738,6 +738,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      # The public build and browser fixture need no database credentials.
+      - name: Verify public production 200/404 CSP and navigation in real Chromium
+        run: |
+          npm run build --workspace @virki/public-site
+          npm run test:issue119:public-browser
+
       - name: Start least-privilege disposable PostgreSQL
         shell: bash
         run: |
@@ -797,9 +806,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libnss3-tools
-
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
 
       - name: Guard disposable E2E database target
         run: npx tsx scripts/e2e/global-setup.mts --validate-database
@@ -888,11 +894,6 @@ jobs:
 
       - name: Verify Hub production 200/404 CSP in real Chromium
         run: npm run test:issue119:hub-browser
-
-      - name: Verify public production 200/404 CSP and navigation in real Chromium
-        run: |
-          npm run build --workspace @virki/public-site
-          npm run test:issue119:public-browser
 
       - name: Remove disposable PostgreSQL
         if: always()

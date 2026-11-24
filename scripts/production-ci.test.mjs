@@ -608,6 +608,18 @@ test("authenticated E2E uses the real PostgreSQL role initializer and scoped dis
   assert.doesNotMatch(e2e, /services:\r?\n\x20+postgres:/u);
 });
 
+test("public production browser validation precedes disposable database credential creation", () => {
+  const e2e = workflow.match(/authenticated-e2e:[\s\S]*?(?=\n\x20{2}[a-z-]+:|$)/u)?.[0] ?? "";
+  const install = e2e.indexOf("- name: Install Playwright Chromium");
+  const publicGate = e2e.indexOf("- name: Verify public production 200/404 CSP and navigation in real Chromium");
+  const database = e2e.indexOf("- name: Start least-privilege disposable PostgreSQL");
+  assert.ok(install >= 0 && install < publicGate && publicGate < database,
+    "public Next build and browser validation must run before database credentials exist");
+  const gate = e2e.slice(publicGate, database);
+  assert.match(gate, /run: \|\r?\n\s+npm run build --workspace @virki\/public-site\r?\n\s+npm run test:issue119:public-browser/u);
+  assert.doesNotMatch(gate, /(?:^|\n)\s*(?:if|continue-on-error):/u);
+});
+
 test("CI and CodeQL run on stacked cdx pull requests while production builds remain main-push only", () => {
   for (const source of [workflow, codeqlWorkflow]) {
     assert.match(source, /pull_request:\r?\n\x20{4}branches:\r?\n\x20{6}- main\r?\n\x20{6}- ["']?cdx\/\*\*["']?/u);
