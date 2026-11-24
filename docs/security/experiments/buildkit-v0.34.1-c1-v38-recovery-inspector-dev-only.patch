@@ -1,0 +1,223 @@
+diff --git a/session/filesync/sealed_publication_broker_v36_linux.go b/session/filesync/sealed_publication_broker_v36_linux.go
+index 9972760..2551597 100644
+--- a/session/filesync/sealed_publication_broker_v36_linux.go
++++ b/session/filesync/sealed_publication_broker_v36_linux.go
+@@ -29,6 +29,18 @@ import (
+ // into fresh root-owned inodes and checks the copied bytes before publication.
+ func publishV36RootOwnedSnapshot(sourceRootFD int, expectedReceiverUID, expectedReceiverGID uint32,
+ 	dest string, manifest V15SealedManifest) error {
++	return publishV38RootOwnedSnapshotWithParentSync(sourceRootFD, expectedReceiverUID,
++		expectedReceiverGID, dest, manifest, unix.Fsync)
++}
++
++// V38 provides a deterministic fsync failure seam for DEV recovery tests.
++// The trusted production-shaped entrypoint above ALWAYS passes unix.Fsync;
++// arbitrary peer input cannot choose the parent sync operation.
++func publishV38RootOwnedSnapshotWithParentSync(sourceRootFD int, expectedReceiverUID, expectedReceiverGID uint32,
++	dest string, manifest V15SealedManifest, syncParent func(int) error) error {
++	if syncParent == nil {
++		return errors.New("C1 V38 trusted parent sync is required")
++	}
+ 	if os.Geteuid() != 0 || os.Getuid() != 0 || expectedReceiverUID == 0 || expectedReceiverGID == 0 ||
+ 		sourceRootFD < 0 || manifest.Digest == "" || v15ManifestDigest(manifest) != manifest.Digest ||
+ 		manifest.Bytes < 0 || manifest.Bytes > 64<<20 {
+@@ -195,7 +207,7 @@ func publishV36RootOwnedSnapshot(sourceRootFD int, expectedReceiverUID, expected
+ 	if err := unix.Renameat2(parentFD, stageName, parentFD, name, unix.RENAME_NOREPLACE); err != nil {
+ 		return fmt.Errorf("C1 V36 protected root-owner atomic publication rejected: %w", err)
+ 	}
+-	if err := unix.Fsync(parentFD); err != nil {
++	if err := syncParent(parentFD); err != nil {
+ 		return &V22PublishedButUnadmittedError{Destination: dest,
+ 			Cause: fmt.Errorf("C1 V36 parent fsync uncertain after publication: %w", err)}
+ 	}
+diff --git a/session/filesync/sealed_publication_recovery_v38_linux.go b/session/filesync/sealed_publication_recovery_v38_linux.go
+new file mode 100644
+index 0000000..63f76e2
+--- /dev/null
++++ b/session/filesync/sealed_publication_recovery_v38_linux.go
+@@ -0,0 +1,94 @@
++//go:build linux
++
++package filesync
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"golang.org/x/sys/unix"
++)
++
++// V38RootPublicationObservation is a READ-ONLY DEV observation; it is NOT a
++// release token, proof of owner permission, or a durable replay ledger.
++// In particular an intact published snapshot after a crash is always
++// "requires-owner-reauthorization", not automatically admitted.
++type V38RootPublicationObservation string
++
++const (
++	v38AbsentNeedsNewPermit             V38RootPublicationObservation = "absent-needs-new-permit"
++	v38PresentNeedsOwnerReauthorization V38RootPublicationObservation = "present-requires-owner-reauthorization"
++)
++
++// inspectV38RootPublishedSnapshot verifies a potential prior V36/V37 output
++// under independently root-owned custody after an ambiguous fsync or crash.
++// It never repairs, deletes, renames, signs or makes the snapshot available
++// for an owner without separately witnessed C4 authorization and replay state.
++// Every ambiguous or untrusted inode is an error, not a positive observation.
++func inspectV38RootPublishedSnapshot(dest string, manifest V15SealedManifest) (V38RootPublicationObservation, error) {
++	if os.Getuid() != 0 || os.Geteuid() != 0 || !filepath.IsAbs(dest) ||
++		filepath.Clean(dest) != dest || dest == "/" || manifest.Digest == "" ||
++		v15ManifestDigest(manifest) != manifest.Digest {
++		return "", errors.New("C1 V38 recovery inspector needs trusted root, canonical path and frozen manifest")
++	}
++	if err := validateV15Request(V15SnapshotRequest{Root: "v38-protected-recovery",
++		ContextName: manifest.ContextName, WorkerID: manifest.WorkerID, SessionID: manifest.SessionID,
++		Nonce: manifest.Nonce, Files: manifest.Files}); err != nil {
++		return "", fmt.Errorf("C1 V38 recovery manifest refused: %w", err)
++	}
++	parent, name := filepath.Dir(dest), filepath.Base(dest)
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return "", err
++	}
++	defer unix.Close(rootFD)
++	if err := validateV24TrustedSupervisorAncestors(rootFD, parent); err != nil {
++		return "", fmt.Errorf("C1 V38 untrusted recovery ancestor: %w", err)
++	}
++	parentFD, err := unix.Openat2(rootFD, strings.TrimPrefix(parent, "/"), &unix.OpenHow{
++		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
++	})
++	if err != nil {
++		return "", fmt.Errorf("C1 V38 untrusted recovery parent: %w", err)
++	}
++	defer unix.Close(parentFD)
++	var parentStat unix.Stat_t
++	if err := unix.Fstat(parentFD, &parentStat); err != nil {
++		return "", err
++	}
++	if parentStat.Mode&unix.S_IFMT != unix.S_IFDIR || parentStat.Uid != 0 || parentStat.Mode&0777 != 0700 {
++		return "", errors.New("C1 V38 recovery parent is not protected root 0700")
++	}
++	var entryStat unix.Stat_t
++	if err := unix.Fstatat(parentFD, name, &entryStat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
++		if errors.Is(err, unix.ENOENT) {
++			return v38AbsentNeedsNewPermit, nil
++		}
++		return "", fmt.Errorf("C1 V38 destination lookup inconclusive: %w", err)
++	}
++	if entryStat.Mode&unix.S_IFMT != unix.S_IFDIR || entryStat.Uid != 0 || entryStat.Mode&0777 != 0700 {
++		return "", errors.New("C1 V38 recovered destination not protected root 0700 directory")
++	}
++	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return "", fmt.Errorf("C1 V38 recovered destination cannot be pinned: %w", err)
++	}
++	defer unix.Close(fd)
++	if err := requireV23StageNameIdentity(parentFD, fd, name); err != nil {
++		return "", fmt.Errorf("C1 V38 recovered filename does not match pinned inode: %w", err)
++	}
++	if err := verifyV23StageTreeFD(fd, manifest); err != nil {
++		return "", fmt.Errorf("C1 V38 recovered manifest membership untrusted: %w", err)
++	}
++	if err := verifyAndSyncV22Stage(fd, manifest); err != nil {
++		return "", fmt.Errorf("C1 V38 recovered contents untrusted: %w", err)
++	}
++	if err := requireV23StageNameIdentity(parentFD, fd, name); err != nil {
++		return "", fmt.Errorf("C1 V38 recovered pathname changed: %w", err)
++	}
++	return v38PresentNeedsOwnerReauthorization, nil
++}
+diff --git a/session/filesync/sealed_publication_recovery_v38_linux_test.go b/session/filesync/sealed_publication_recovery_v38_linux_test.go
+new file mode 100644
+index 0000000..9be07e2
+--- /dev/null
++++ b/session/filesync/sealed_publication_recovery_v38_linux_test.go
+@@ -0,0 +1,85 @@
++//go:build linux
++
++package filesync
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++// Root-only, opt-in and disposable. This models the ambiguity of a parent
++// fsync error after atomic publication but does NOT issue an owner C4 permit.
++func TestC1V38RootBrokerAmbiguousFsyncRequiresOwnerReauthorization(t *testing.T) {
++	const uid = 60013
++	if os.Getenv("VIRKI_V38_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("V38 ambiguous fsync requires opt-in disposable root fixture")
++	}
++	base, err := os.MkdirTemp("/tmp", "virki-v38-recovery-")
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
++	require.NoError(t, os.Chmod(base, 0711))
++	source := filepath.Join(base, "source")
++	private := filepath.Join(base, "protected")
++	require.NoError(t, os.Mkdir(source, 0700))
++	require.NoError(t, os.Chown(source, uid, uid))
++	require.NoError(t, os.WriteFile(filepath.Join(source, "app.js"), []byte("SAFE"), 0600))
++	require.NoError(t, os.Chown(filepath.Join(source, "app.js"), uid, uid))
++	require.NoError(t, os.Mkdir(private, 0700))
++	fd, err := unix.Open(source, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
++	require.NoError(t, err)
++	defer unix.Close(fd)
++	manifest := v15PacketManifest()
++	dest := filepath.Join(private, "published")
++	forged := manifest
++	forged.Digest = "sha256:forged"
++	_, err = inspectV38RootPublishedSnapshot(dest, forged)
++	require.ErrorContains(t, err, "frozen manifest")
++	state, err := inspectV38RootPublishedSnapshot(dest, manifest)
++	require.NoError(t, err)
++	require.Equal(t, v38AbsentNeedsNewPermit, state)
++
++	invoked := false
++	err = publishV38RootOwnedSnapshotWithParentSync(fd, uid, uid, dest, manifest, func(parentFD int) error {
++		invoked = true
++		var st unix.Stat_t
++		require.NoError(t, unix.Fstat(parentFD, &st))
++		require.Equal(t, uint32(0), st.Uid)
++		return unix.EIO // fault exactly AFTER RENAME_NOREPLACE
++	})
++	require.True(t, invoked, "the test must reach an actual post-rename fsync fault")
++	var terminal *V22PublishedButUnadmittedError
++	require.ErrorAs(t, err, &terminal)
++	require.ErrorContains(t, err, "parent fsync uncertain after publication")
++	actual, err := os.ReadFile(filepath.Join(dest, "app.js"))
++	require.NoError(t, err)
++	require.Equal(t, []byte("SAFE"), actual, "data exists despite denied/ambiguous admission")
++	state, err = inspectV38RootPublishedSnapshot(dest, manifest)
++	require.NoError(t, err)
++	require.Equal(t, v38PresentNeedsOwnerReauthorization, state,
++		"even an intact verified publication cannot auto-admit after crash/fsync error")
++	// A replay attempt must not replace an already published name; no-replace
++	// publication is mandatory even if its previous acceptance was ambiguous.
++	err = publishV36RootOwnedSnapshot(fd, uid, uid, dest, manifest)
++	require.ErrorContains(t, err, "preexisting destination")
++
++	// A privileged or compromised publisher could mutate the file after the
++	// simulated crash. Recovery must REFUSE it, never trust path existence.
++	require.NoError(t, os.WriteFile(filepath.Join(dest, "app.js"), []byte("EVIL"), 0600))
++	state, err = inspectV38RootPublishedSnapshot(dest, manifest)
++	require.Error(t, err)
++	require.Empty(t, state)
++	require.ErrorContains(t, err, "recovered contents untrusted")
++	// Foreign/symlink destination is never followed or treated as absent.
++	require.NoError(t, os.RemoveAll(dest))
++	require.NoError(t, os.Symlink(source, dest))
++	state, err = inspectV38RootPublishedSnapshot(dest, manifest)
++	require.Error(t, err)
++	require.Empty(t, state)
++	require.ErrorContains(t, err, "not protected root 0700 directory")
++	_, statErr := os.Lstat(dest)
++	require.NoError(t, statErr, "recovery inspection must not mutate or delete the suspect path")
++}

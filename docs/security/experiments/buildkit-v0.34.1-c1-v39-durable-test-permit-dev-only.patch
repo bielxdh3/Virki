@@ -1,0 +1,451 @@
+diff --git a/session/filesync/sealed_publication_ledger_v39_linux.go b/session/filesync/sealed_publication_ledger_v39_linux.go
+new file mode 100644
+index 0000000..632edbf
+--- /dev/null
++++ b/session/filesync/sealed_publication_ledger_v39_linux.go
+@@ -0,0 +1,177 @@
++//go:build linux
++
++package filesync
++
++import (
++	"crypto/ed25519"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"time"
++
++	"golang.org/x/sys/unix"
++)
++
++const v39LedgerMaxBytes = 1024 * 1024
++
++// claimV39DurableTestOwnerPermit reserves a TEST-DOMAIN V15 signed owner
++// permit BEFORE accepting any descriptor/network bytes. The ledger file must
++// be provisioned and durably synced by a trusted root supervisor BEFORE the
++// broker is available; its absence is a terminal refusal, never an empty
++// auto-created replay history. The public key,
++// manifest, epoch floor and ledger directory must be supplied by a distinct
++// trusted supervisor, never by the untrusted sender. This is an UNWIRED DEV
++// reference, not actual C4 owner signing/rollout authorization.
++func claimV39DurableTestOwnerPermit(ledgerDir string, m V15SealedManifest, p V15OwnerPermit,
++	trustedPub ed25519.PublicKey, minimumEpoch, maximumEpoch uint64) error {
++	return claimV39DurableTestOwnerPermitWithSync(ledgerDir, m, p, trustedPub,
++		minimumEpoch, maximumEpoch, unix.Fsync)
++}
++
++// withSync is a private deterministic fault injection seam. The normal
++// entrypoint above always uses the real Linux fsync syscall.
++func claimV39DurableTestOwnerPermitWithSync(ledgerDir string, m V15SealedManifest, p V15OwnerPermit,
++	trustedPub ed25519.PublicKey, minimumEpoch, maximumEpoch uint64, syncFile func(int) error) error {
++	if os.Getuid() != 0 || os.Geteuid() != 0 || minimumEpoch == 0 ||
++		maximumEpoch < minimumEpoch || p.Epoch > maximumEpoch || syncFile == nil ||
++		!filepath.IsAbs(ledgerDir) || filepath.Clean(ledgerDir) != ledgerDir || ledgerDir == "/" {
++		return errors.New("C1 V39 requires trusted root-owned canonical ledger and positive owner epoch floor")
++	}
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return err
++	}
++	defer unix.Close(rootFD)
++	if err := validateV24TrustedSupervisorAncestors(rootFD, ledgerDir); err != nil {
++		return fmt.Errorf("C1 V39 ledger ancestor untrusted: %w", err)
++	}
++	parentFD, err := unix.Openat2(rootFD, strings.TrimPrefix(ledgerDir, "/"), &unix.OpenHow{
++		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
++	})
++	if err != nil {
++		return err
++	}
++	defer unix.Close(parentFD)
++	var parentStat unix.Stat_t
++	if err := unix.Fstat(parentFD, &parentStat); err != nil {
++		return err
++	}
++	if parentStat.Mode&unix.S_IFMT != unix.S_IFDIR || parentStat.Uid != 0 ||
++		parentStat.Gid != 0 || parentStat.Mode&07777 != 0700 {
++		return errors.New("C1 V39 durable ledger parent must be trusted root:root 0700")
++	}
++	fd, err := unix.Openat(parentFD, ".virki-v39-claims",
++		unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
++	if err != nil {
++		return err
++	}
++	f := os.NewFile(uintptr(fd), "v39-claims")
++	defer f.Close()
++	var st unix.Stat_t
++	if err := unix.Fstat(fd, &st); err != nil {
++		return err
++	}
++	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != 0 || st.Gid != 0 ||
++		st.Mode&07777 != 0600 || st.Nlink != 1 || st.Size > v39LedgerMaxBytes {
++		return errors.New("C1 V39 claim ledger has untrusted metadata or exceeded bounded size")
++	}
++	deadline := time.Now().Add(3 * time.Second)
++	for {
++		if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err == nil {
++			break
++		} else if !errors.Is(err, unix.EWOULDBLOCK) || time.Now().After(deadline) {
++			return fmt.Errorf("C1 V39 exclusive durable claim lock unavailable: %w", err)
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	defer unix.Flock(fd, unix.LOCK_UN)
++	if _, err := f.Seek(0, io.SeekStart); err != nil {
++		return err
++	}
++	data, err := io.ReadAll(io.LimitReader(f, v39LedgerMaxBytes+1))
++	if err != nil || len(data) > v39LedgerMaxBytes {
++		return errors.New("C1 V39 durable claim log malformed or unbounded")
++	}
++	floor := minimumEpoch
++	claims := make(map[string]struct{})
++	if len(data) > 0 {
++		if data[len(data)-1] != '\n' {
++			return errors.New("C1 V39 incomplete persistent claim record; manual review required")
++		}
++		for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
++			fields := strings.Split(line, " ")
++			if len(fields) != 3 || fields[0] != "V39" || len(fields[2]) != 64 {
++				return errors.New("C1 V39 malformed persistent claim record")
++			}
++			epoch, err := strconv.ParseUint(fields[1], 10, 64)
++			if err != nil || epoch == 0 {
++				return errors.New("C1 V39 invalid persistent epoch")
++			}
++			keyBytes, err := hex.DecodeString(fields[2])
++			if err != nil || len(keyBytes) != sha256.Size {
++				return errors.New("C1 V39 invalid persistent claim key")
++			}
++			if _, exists := claims[fields[2]]; exists {
++				return errors.New("C1 V39 duplicated persistent claim key")
++			}
++			claims[fields[2]] = struct{}{}
++			if epoch > floor {
++				floor = epoch
++			}
++		}
++	}
++	// Reuse existing signed-permit validation/expiry checks, but never rely on
++	// its volatile map for replay; that is enforced by the fsynced root ledger.
++	if err := NewV15LocalReplayLedger(floor).VerifyAndClaim(m, p, trustedPub); err != nil {
++		return fmt.Errorf("C1 V39 signed owner permit refused: %w", err)
++	}
++	hash := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s", V15OwnerDomain, p.Epoch, p.ApprovalID)))
++	key := hex.EncodeToString(hash[:])
++	if _, exists := claims[key]; exists {
++		return errors.New("C1 V39 signed owner permit replayed after restart or concurrent claim")
++	}
++	row := fmt.Sprintf("V39 %d %s\n", p.Epoch, key)
++	if len(data)+len(row) > v39LedgerMaxBytes {
++		return errors.New("C1 V39 durable ledger full; refuse until independent operator migration")
++	}
++	if _, err := f.Seek(0, io.SeekEnd); err != nil {
++		return err
++	}
++	if n, err := f.Write([]byte(row)); err != nil || n != len(row) {
++		return errors.New("C1 V39 ambiguous claim write; never publish")
++	}
++	if err := syncFile(fd); err != nil {
++		return fmt.Errorf("C1 V39 ambiguous claim file fsync; never publish: %w", err)
++	}
++	if err := unix.Fsync(parentFD); err != nil {
++		return fmt.Errorf("C1 V39 ambiguous ledger parent fsync; never publish: %w", err)
++	}
++	return nil
++}
++
++// publishV39FromAuthorizedTestPeer is an UNWIRED, synthetic test composition:
++// the independently trusted V15 test permit is claimed and made durable
++// BEFORE any SCM_RIGHTS receive, source read, or publication side effect.
++// Even if a later handoff or publish fails, the permit is consumed. The
++// real C4 approval, operational receiver identity and crash-recovery state
++// machine DO NOT exist here. Do not connect this to a production RPC.
++func publishV39FromAuthorizedTestPeer(ledgerDir string, conn *net.UnixConn,
++	expectedPID int, expectedUID, expectedGID uint32, dest string,
++	manifest V15SealedManifest, permit V15OwnerPermit,
++	trustedPub ed25519.PublicKey, minimumEpoch, maximumEpoch uint64) error {
++	if conn == nil || expectedPID <= 1 || expectedUID == 0 || expectedGID == 0 {
++		return errors.New("C1 V39 requires a preaccepted peer and trusted nonroot identity")
++	}
++	if err := claimV39DurableTestOwnerPermit(ledgerDir, manifest, permit, trustedPub, minimumEpoch, maximumEpoch); err != nil {
++		return fmt.Errorf("C1 V39 refused publication before descriptor admission: %w", err)
++	}
++	return publishV37FromAuthenticatedPeer(conn, expectedPID, expectedUID, expectedGID, dest, manifest)
++}
+diff --git a/session/filesync/sealed_publication_ledger_v39_linux_test.go b/session/filesync/sealed_publication_ledger_v39_linux_test.go
+new file mode 100644
+index 0000000..b3a2ba4
+--- /dev/null
++++ b/session/filesync/sealed_publication_ledger_v39_linux_test.go
+@@ -0,0 +1,262 @@
++//go:build linux
++
++package filesync
++
++import (
++	"bytes"
++	"crypto/ed25519"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"os/exec"
++	"os/user"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"sync"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++type v39ChildClaim struct {
++	Ledger   string
++	Manifest V15SealedManifest
++	Permit   V15OwnerPermit
++	Public   ed25519.PublicKey
++}
++
++// Every path, permit, peer and published byte in this test is a disposable
++// synthetic fixture. These assertions are NOT a C4 production authorization.
++func TestC1V39DurableTestPermitAndAuthenticatedPublication(t *testing.T) {
++	const uid uint32 = 60014
++	if os.Getenv("VIRKI_V39_CHILD") == "claim" {
++		raw, err := base64.StdEncoding.DecodeString(os.Getenv("VIRKI_V39_CLAIM"))
++		require.NoError(t, err)
++		var c v39ChildClaim
++		require.NoError(t, json.Unmarshal(raw, &c))
++		if err := claimV39DurableTestOwnerPermit(c.Ledger, c.Manifest, c.Permit, c.Public, 7, 8); err != nil {
++			fmt.Println("V39_CLAIM_REJECTED")
++		} else {
++			fmt.Println("V39_CLAIM_ACCEPTED")
++		}
++		return
++	}
++	if os.Getenv("VIRKI_V39_CHILD") == "sender" {
++		require.Equal(t, int(uid), os.Getuid())
++		fd, err := os.Open(os.Getenv("VIRKI_V39_SOURCE"))
++		require.NoError(t, err)
++		defer fd.Close()
++		conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: os.Getenv("VIRKI_V39_SOCKET"), Net: "unix"})
++		require.NoError(t, err)
++		defer conn.Close()
++		_, _, err = conn.WriteMsgUnix([]byte{'V'}, unix.UnixRights(int(fd.Fd())), nil)
++		require.NoError(t, err)
++		return
++	}
++	if os.Getenv("VIRKI_V39_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("V39 requires explicit disposable root-owned fixture")
++	}
++	if _, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
++		t.Skip("synthetic V39 sender UID already exists")
++	}
++	// /tmp is a separate tmpfs on this WSL host; ledger custody deliberately
++	// forbids cross-mount path traversal. /var/tmp remains on root ext4 here.
++	base, err := os.MkdirTemp("/var/tmp", "virki-v39-permit-")
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
++	require.NoError(t, os.Chmod(base, 0711))
++	ledgerFile := func(dir string) string { return filepath.Join(dir, ".virki-v39-claims") }
++	provision := func(name string) string {
++		dir := filepath.Join(base, name)
++		require.NoError(t, os.Mkdir(dir, 0700))
++		require.NoError(t, os.WriteFile(ledgerFile(dir), nil, 0600))
++		fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++		require.NoError(t, err)
++		require.NoError(t, unix.Fsync(fd), "fixture ledger must exist durably before broker use")
++		require.NoError(t, unix.Close(fd))
++		return dir
++	}
++	manifest := v15PacketManifest()
++	pub, priv, err := ed25519.GenerateKey(rand.Reader)
++	require.NoError(t, err)
++	sign := func(approval string, epoch uint64) V15OwnerPermit {
++		p := V15OwnerPermit{
++			Domain: V15OwnerDomain, ApprovalID: approval, ManifestDigest: manifest.Digest,
++			WorkerID: manifest.WorkerID, SessionID: manifest.SessionID,
++			ContextName: manifest.ContextName, Nonce: manifest.Nonce,
++			Epoch: epoch, ExpiresUnix: time.Now().Add(time.Hour).Unix(),
++		}
++		p.Signature = ed25519.Sign(priv, v15PermitBytes(p))
++		return p
++	}
++	claim := func(dir string, p V15OwnerPermit) error {
++		return claimV39DurableTestOwnerPermit(dir, manifest, p, pub, 7, 8)
++	}
++	mainLedger := provision("main-ledger")
++	p := sign("first", 7)
++	require.NoError(t, claim(mainLedger, p))
++	require.ErrorContains(t, claim(mainLedger, p), "replayed", "new file open must retain replay fence")
++	for _, bad := range []V15OwnerPermit{sign("stale", 6), sign("future", 9)} {
++		require.Error(t, claim(mainLedger, bad), "out-of-policy epoch must not be claimed")
++	}
++	forged := sign("forged", 8)
++	forged.Signature = append([]byte(nil), forged.Signature...)
++	forged.Signature[0] ^= 1
++	require.Error(t, claim(mainLedger, forged))
++	require.Error(t, claimV39DurableTestOwnerPermit(mainLedger, manifest, sign("wrong-key", 8),
++		make(ed25519.PublicKey, ed25519.PublicKeySize), 7, 8))
++	require.NoError(t, claim(mainLedger, sign("second", 8)))
++	require.Error(t, claim(mainLedger, sign("epoch-fenced", 7)))
++
++	t.Run("concurrent independent processes accept at most one", func(t *testing.T) {
++		dir := provision("concurrent")
++		cfg, err := json.Marshal(v39ChildClaim{dir, manifest, sign("racing-claim", 7), pub})
++		require.NoError(t, err)
++		self, err := os.Executable()
++		require.NoError(t, err)
++		var wg sync.WaitGroup
++		results := make(chan string, 2)
++		for i := 0; i < 2; i++ {
++			wg.Add(1)
++			go func() {
++				defer wg.Done()
++				cmd := exec.Command(self, "-test.run=^TestC1V39DurableTestPermitAndAuthenticatedPublication$")
++				cmd.Env = append(os.Environ(), "VIRKI_V39_CHILD=claim",
++					"VIRKI_V39_CLAIM="+base64.StdEncoding.EncodeToString(cfg))
++				out, err := cmd.CombinedOutput()
++				results <- fmt.Sprintf("err=%v out=%s", err, out)
++			}()
++		}
++		wg.Wait()
++		close(results)
++		accepted := 0
++		rejected := 0
++		for result := range results {
++			require.Contains(t, result, "err=<nil>", result)
++			if strings.Contains(result, "V39_CLAIM_ACCEPTED") {
++				accepted++
++			}
++			if strings.Contains(result, "V39_CLAIM_REJECTED") {
++				rejected++
++			}
++		}
++		require.Equal(t, 1, accepted, "flock must serialize independent claims")
++		require.Equal(t, 1, rejected)
++		require.Error(t, claim(dir, sign("racing-claim", 7)), "claim must remain consumed after children exit")
++	})
++
++	t.Run("malformed, insecure, or missing ledger always refuses", func(t *testing.T) {
++		dir := provision("untrusted")
++		file := ledgerFile(dir)
++		bad := sign("safety", 7)
++		require.NoError(t, os.WriteFile(file, []byte("V39 7 abc"), 0600))
++		require.Error(t, claim(dir, bad), "interrupted append without LF is terminal")
++		require.NoError(t, os.WriteFile(file, []byte("V39 7 "+strings.Repeat("z", 64)+"\n"), 0600))
++		require.Error(t, claim(dir, bad), "malformed hash cannot silently reset replay floor")
++		require.NoError(t, os.WriteFile(file, nil, 0600))
++		require.NoError(t, os.Chmod(file, 0644))
++		require.Error(t, claim(dir, bad), "world-readable ledger forbidden")
++		require.NoError(t, os.Chmod(file, 0600))
++		require.NoError(t, os.Link(file, filepath.Join(dir, "linked")))
++		require.Error(t, claim(dir, bad), "hardlink alias forbidden")
++		require.NoError(t, os.Remove(filepath.Join(dir, "linked")))
++		require.NoError(t, os.WriteFile(file, bytes.Repeat([]byte("x"), v39LedgerMaxBytes+1), 0600))
++		require.Error(t, claim(dir, bad), "oversize ledger forbidden")
++		require.NoError(t, os.Remove(file))
++		require.Error(t, claim(dir, bad), "missing ledger must not be recreated empty")
++		require.NoError(t, os.Symlink("/dev/null", file))
++		require.Error(t, claim(dir, bad), "symlink ledger forbidden")
++		require.NoError(t, os.Remove(file))
++		require.NoError(t, os.Chmod(dir, 0777))
++		require.Error(t, claim(dir, bad), "directory authority must be root-owned private")
++	})
++
++	t.Run("ambiguous fsync consumes or fails closed", func(t *testing.T) {
++		dir := provision("failed-fsync")
++		bad := sign("fault-claim", 7)
++		reached := false
++		err := claimV39DurableTestOwnerPermitWithSync(dir, manifest, bad, pub, 7, 8, func(fd int) error {
++			reached = true
++			return unix.EIO
++		})
++		require.True(t, reached)
++		require.ErrorContains(t, err, "ambiguous claim file fsync")
++		require.Error(t, claim(dir, bad), "no successful publication after uncertain claim write")
++	})
++
++	t.Run("authentic peer is admitted only after durable claim", func(t *testing.T) {
++		dir := provision("publish-ledger")
++		private := filepath.Join(base, "protected")
++		source := filepath.Join(base, "source")
++		require.NoError(t, os.Mkdir(private, 0700))
++		require.NoError(t, os.Mkdir(source, 0700))
++		require.NoError(t, os.Chown(source, int(uid), int(uid)))
++		require.NoError(t, os.WriteFile(filepath.Join(source, "app.js"), []byte("SAFE"), 0600))
++		require.NoError(t, os.Chown(filepath.Join(source, "app.js"), int(uid), int(uid)))
++		// This preaccept refusal cannot read even a malformed peer connection:
++		// no FD is consumed, no destination is touched, and no permit is claimed.
++		dest := filepath.Join(private, "published")
++		unauthorized := sign("unauthorized", 7)
++		unauthorized.Signature = []byte("fake")
++		require.Error(t, publishV39FromAuthorizedTestPeer(dir, &net.UnixConn{}, 42, uid, uid,
++			dest, manifest, unauthorized, pub, 7, 8))
++		_, err := os.Lstat(dest)
++		require.ErrorIs(t, err, os.ErrNotExist)
++
++		self, err := os.Executable()
++		require.NoError(t, err)
++		input, err := os.Open(self)
++		require.NoError(t, err)
++		defer input.Close()
++		helper := filepath.Join(base, "helper")
++		output, err := os.OpenFile(helper, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0555)
++		require.NoError(t, err)
++		_, err = io.Copy(output, input)
++		require.NoError(t, err)
++		require.NoError(t, output.Close())
++		require.NoError(t, os.Chmod(helper, 0555))
++		sock := filepath.Join(base, "test.sock")
++		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
++		require.NoError(t, err)
++		defer listener.Close()
++		require.NoError(t, os.Chown(sock, 0, int(uid)))
++		require.NoError(t, os.Chmod(sock, 0660))
++		cmd := exec.Command(helper, "-test.run=^TestC1V39DurableTestPermitAndAuthenticatedPublication$")
++		cmd.Env = append(os.Environ(), "VIRKI_V39_CHILD=sender",
++			"VIRKI_V39_SOURCE="+source, "VIRKI_V39_SOCKET="+sock)
++		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
++			Uid: uid, Gid: uid, Groups: []uint32{},
++		}}
++		require.NoError(t, cmd.Start())
++		t.Cleanup(func() {
++			if cmd.ProcessState == nil {
++				_ = cmd.Process.Kill()
++				_ = cmd.Wait()
++			}
++		})
++		require.NoError(t, listener.SetDeadline(time.Now().Add(5*time.Second)))
++		conn, err := listener.AcceptUnix()
++		require.NoError(t, err)
++		defer conn.Close()
++		permit := sign("published-once", 7)
++		require.NoError(t, publishV39FromAuthorizedTestPeer(dir, conn, cmd.Process.Pid,
++			uid, uid, dest, manifest, permit, pub, 7, 8))
++		require.NoError(t, cmd.Wait())
++		got, err := os.ReadFile(filepath.Join(dest, "app.js"))
++		require.NoError(t, err)
++		require.Equal(t, []byte("SAFE"), got)
++		require.ErrorContains(t, publishV39FromAuthorizedTestPeer(dir, &net.UnixConn{},
++			cmd.Process.Pid, uid, uid, filepath.Join(private, "replayed"),
++			manifest, permit, pub, 7, 8), "replayed")
++		_, err = os.Lstat(filepath.Join(private, "replayed"))
++		require.ErrorIs(t, err, os.ErrNotExist)
++	})
++}

@@ -353,6 +353,36 @@ static const char *v3_json_skip_string(const char *p, const char *end) {
   return NULL;
 }
 
+/* Native evidence verification compares JSON field names as raw bytes. JSON
+ * consumers decode escaped names and may apply last-wins semantics, so an
+ * escaped alias (e.g. \u0072ole alongside role) would make the same evidence
+ * mean different things to the C4 verifier and a downstream JSON consumer.
+ * Require literal, canonical object keys at every nesting level. Value strings
+ * may still use ordinary JSON escapes. */
+static bool v3_json_canonical_key(const char *start, const char *end) {
+  if (!start || !end || end - start < 2 || *start != '"' || *(end - 1) != '"') return false;
+  /* Bound object-key interpretation to the ASCII field grammar consumed by
+   * C4 and Go's VROA JSON structs. Non-ASCII Unicode folding and escaped
+   * aliases otherwise give another parser a different semantic key. */
+  for (const char *p = start + 1; p < end - 1; p++) {
+    const uint8_t ch = (uint8_t)*p;
+    if (ch < 0x21 || ch > 0x7e || ch == '\\') return false;
+  }
+  return true;
+}
+
+static bool v3_json_keys_fold_equal(
+    const char *a, size_t a_len, const char *b, size_t b_len) {
+  if (a_len != b_len) return false;
+  for (size_t i = 0; i < a_len; i++) {
+    uint8_t ca = (uint8_t)a[i], cb = (uint8_t)b[i];
+    if (ca >= 'A' && ca <= 'Z') ca = (uint8_t)(ca + 'a' - 'A');
+    if (cb >= 'A' && cb <= 'Z') cb = (uint8_t)(cb + 'a' - 'A');
+    if (ca != cb) return false;
+  }
+  return true;
+}
+
 static const char *v3_json_skip_value(const char *p, const char *end, int depth) {
   if (!p || depth > 64) return NULL;
   p = v3_json_skip_ws(p, end);
@@ -361,10 +391,25 @@ static const char *v3_json_skip_value(const char *p, const char *end, int depth)
   if (*p == '{') {
     p = v3_json_skip_ws(p + 1, end);
     if (p < end && *p == '}') return p + 1;
+    /* A Go decoder may bind both "role" and "Role" to the same tagged struct
+     * member, choosing the LAST entry; this C verifier chooses the literal
+     * field. Reject collisions before interpreting any signed evidence.
+     * Cap each object's keys to avoid quadratic work on untrusted metadata. */
+    struct { const char *name; size_t length; } keys[128];
+    size_t key_count = 0;
     while (p < end) {
       p = v3_json_skip_ws(p, end);
+      const char *key_start = p;
       p = v3_json_skip_string(p, end);
-      if (!p) return NULL;
+      if (!v3_json_canonical_key(key_start, p)) return NULL;
+      const size_t key_length = (size_t)(p - key_start - 2);
+      if (key_count >= sizeof(keys) / sizeof(keys[0])) return NULL;
+      for (size_t i = 0; i < key_count; i++) {
+        if (v3_json_keys_fold_equal(
+            keys[i].name, keys[i].length, key_start + 1, key_length)) return NULL;
+      }
+      keys[key_count].name = key_start + 1;
+      keys[key_count++].length = key_length;
       p = v3_json_skip_ws(p, end);
       if (p >= end || *p != ':') return NULL;
       p = v3_json_skip_value(p + 1, end, depth + 1);
@@ -451,7 +496,7 @@ static bool v3_json_find_field(const char *obj_start, const char *obj_end,
     p = v3_json_skip_ws(p, obj_end);
     const char *ks = p;
     const char *ke = v3_json_skip_string(ks, obj_end);
-    if (!ke) return false;
+    if (!v3_json_canonical_key(ks, ke)) return false;
     p = v3_json_skip_ws(ke, obj_end);
     if (p >= obj_end || *p != ':') return false;
     const char *vs = v3_json_skip_ws(p + 1, obj_end);
@@ -902,8 +947,130 @@ static bool v3_stream_hash_bytes(int fd, uint64_t length, uint64_t *offset,
   return true;
 }
 
+/* A stream/tree pair can be internally hash-consistent without representing
+ * any directory walk BuildKit could have performed. Verify path grammar,
+ * witnessed parent directories and the Go filepath.WalkDir depth-first,
+ * byte-sorted basename order while consuming only bounded stack memory.
+ * A malformed stream must never become C4's canonical provenance evidence. */
+#define V3_WALK_MAX_UTF16_UNITS 512u
+/* Node bounds the decoded pathname to 512 UTF-16 units, not 1023 UTF-8
+ * octets. Each BMP scalar uses at most three UTF-8 bytes per UTF-16 unit;
+ * supplementary scalars use four bytes per TWO UTF-16 units. Reserve the
+ * exact safe upper bound plus one byte, even for deep legal CJK paths. */
+#define V3_WALK_PATH_BUFFER_BYTES (V3_WALK_MAX_UTF16_UNITS * 3u + 1u)
+typedef struct {
+  char previous[V3_WALK_PATH_BUFFER_BYTES];
+  size_t previous_len;
+  bool previous_directory;
+  char ancestor_path[V3_WALK_PATH_BUFFER_BYTES];
+  uint16_t ancestor_lengths[1024];
+  size_t depth;
+} v3_walk_state;
+
+static bool v3_walk_path_follows(const v3_walk_state *walk, const char *path, size_t length) {
+  size_t previous_at = 0, current_at = 0;
+  while (previous_at < walk->previous_len && current_at < length) {
+    const size_t previous_start = previous_at, current_start = current_at;
+    while (previous_at < walk->previous_len && walk->previous[previous_at] != '/') previous_at++;
+    while (current_at < length && path[current_at] != '/') current_at++;
+    const size_t previous_size = previous_at - previous_start, current_size = current_at - current_start;
+    const size_t smaller = previous_size < current_size ? previous_size : current_size;
+    const int order = memcmp(walk->previous + previous_start, path + current_start, smaller);
+    if (order != 0) return order < 0;
+    if (previous_size != current_size) return previous_size < current_size;
+    if (current_at == length) return false; /* duplicate or prefix regression */
+    if (previous_at == walk->previous_len) return walk->previous_directory;
+    previous_at++;
+    current_at++;
+  }
+  return false;
+}
+
+/* The Node C1 provenance parser uses a fatal UTF-8 decoder before accepting
+ * filenames. Mirror that grammar in C4, including overlong/surrogate/too-high
+ * scalar rejection; never allow a forged sealed stream to bypass the stricter
+ * producer-to-approver contract through arbitrary raw pathname octets. */
+static bool v3_walk_valid_utf8(const uint8_t *bytes, size_t length) {
+  /* Node's fatal TextDecoder otherwise strips an initial UTF-8 BOM and may
+   * validate a different pathname than the raw bytes signed by C4. Admit no
+   * such aliases on either side of the provenance boundary. */
+  if (length >= 3 && bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf) return false;
+  size_t utf16_units = 0;
+  for (size_t i = 0; i < length;) {
+    const uint8_t lead = bytes[i];
+    if (lead < 0x80) {
+      if (++utf16_units > V3_WALK_MAX_UTF16_UNITS) return false;
+      i++;
+      continue;
+    }
+    size_t count;
+    uint8_t second_min = 0x80, second_max = 0xbf;
+    if (lead >= 0xc2 && lead <= 0xdf) count = 1;
+    else if (lead >= 0xe0 && lead <= 0xef) {
+      count = 2;
+      if (lead == 0xe0) second_min = 0xa0;
+      else if (lead == 0xed) second_max = 0x9f;
+    } else if (lead >= 0xf0 && lead <= 0xf4) {
+      count = 3;
+      if (lead == 0xf0) second_min = 0x90;
+      else if (lead == 0xf4) second_max = 0x8f;
+    } else return false;
+    if (count >= length - i || bytes[i + 1] < second_min || bytes[i + 1] > second_max)
+      return false;
+    for (size_t j = 2; j <= count; j++) {
+      if (bytes[i + j] < 0x80 || bytes[i + j] > 0xbf) return false;
+    }
+    /* Node validateRelPath caps JS UTF-16 string length at 512, not
+     * UTF-8 octet count. Supplementary code points occupy two units. */
+    utf16_units += count == 3 ? 2 : 1;
+    if (utf16_units > V3_WALK_MAX_UTF16_UNITS) return false;
+    i += count + 1;
+  }
+  return true;
+}
+
+static bool v3_walk_accept_path(v3_walk_state *walk, const char *path, size_t length, uint8_t kind) {
+  if (!walk || !path || length == 0 || length >= sizeof(walk->previous) ||
+      path[0] == '/' || path[length - 1] == '/' ||
+      !v3_walk_valid_utf8((const uint8_t *)path, length)) return false;
+  size_t segment_start = 0, parent_length = 0;
+  for (size_t i = 0; i <= length; i++) {
+    const char c = i == length ? '/' : path[i];
+    const uint8_t octet = (uint8_t)c;
+    /* Match the upstream C1->C4 Node canonical path admission. Hash agreement
+     * alone must never let the native signer accept control characters or
+     * wildcard names rejected by the non-authorizing provenance contract. */
+    if (octet < 32 || octet == 127 || c == '\\' || c == '*' || c == '?' ||
+        c == '[' || c == ']') return false;
+    if (c != '/') continue;
+    const size_t segment_length = i - segment_start;
+    if (segment_length == 0 ||
+        (segment_length == 1 && path[segment_start] == '.') ||
+        (segment_length == 2 && path[segment_start] == '.' && path[segment_start + 1] == '.')) return false;
+    if (i < length) parent_length = i;
+    segment_start = i + 1;
+  }
+  while (walk->depth != 0) {
+    const size_t ancestor_length = walk->ancestor_lengths[walk->depth - 1];
+    if (ancestor_length == parent_length &&
+        memcmp(walk->ancestor_path, path, ancestor_length) == 0) break;
+    walk->depth--;
+  }
+  if (parent_length != 0 && walk->depth == 0) return false;
+  if (walk->previous_len != 0 && !v3_walk_path_follows(walk, path, length)) return false;
+  if (kind == 'D') {
+    if (walk->depth >= sizeof(walk->ancestor_lengths) / sizeof(walk->ancestor_lengths[0])) return false;
+    memcpy(walk->ancestor_path, path, length);
+    walk->ancestor_lengths[walk->depth++] = (uint16_t)length;
+  }
+  memcpy(walk->previous, path, length);
+  walk->previous_len = length;
+  walk->previous_directory = kind == 'D';
+  return true;
+}
+
 /* Recompute the canonical tree hash from the sealed linear stream, without
- * materializing its paths or trusting a separately supplied tree digest. */
+ * trusting a separately supplied tree digest or arbitrary stream ordering. */
 static bool v3_verify_context_stream_tree(int fd, uint64_t length,
     const char *name, const char *expected_tree) {
   static const char prefix[] = "virki-context-stream-v1\0";
@@ -919,15 +1086,20 @@ static bool v3_verify_context_stream_tree(int fd, uint64_t length,
   virki_abi_sha256_ctx tree;
   virki_abi_sha256_init(&tree);
   virki_abi_sha256_update(&tree, (const uint8_t *)VIRKI_BUILDKIT_TREE_PREFIX_V2, VIRKI_BUILDKIT_TREE_PREFIX_V2_LEN);
+  v3_walk_state walk = {0};
   while (offset < length) {
     uint8_t kind;
     uint64_t path_len, mode, size;
     if (!v3_stream_read(fd, length, &offset, &kind, 1) || (kind != 'D' && kind != 'L' && kind != 'F') ||
-        !v3_stream_uint(fd, length, &offset, &path_len) || path_len == 0) return false;
+        !v3_stream_uint(fd, length, &offset, &path_len) || path_len == 0 ||
+        path_len >= sizeof(walk.previous)) return false;
+    char path[V3_WALK_PATH_BUFFER_BYTES];
+    if (!v3_stream_read(fd, length, &offset, path, (size_t)path_len) ||
+        !v3_walk_accept_path(&walk, path, (size_t)path_len, kind)) return false;
     virki_abi_sha256_update(&tree, &kind, 1);
     virki_abi_write_uint64(&tree, path_len);
-    if (!v3_stream_hash_bytes(fd, length, &offset, path_len, &tree, true) ||
-        !v3_stream_uint(fd, length, &offset, &mode) || mode > 07777) return false;
+    virki_abi_sha256_update(&tree, (const uint8_t *)path, (size_t)path_len);
+    if (!v3_stream_uint(fd, length, &offset, &mode) || mode > 07777) return false;
     virki_abi_write_uint64(&tree, mode);
     if (kind == 'D') continue;
     if (!v3_stream_uint(fd, length, &offset, &size)) return false;

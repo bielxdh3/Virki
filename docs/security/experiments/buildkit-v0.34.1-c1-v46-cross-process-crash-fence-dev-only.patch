@@ -1,0 +1,177 @@
+diff --git a/session/filesync/sealed_publication_v46_interprocess_linux_test.go b/session/filesync/sealed_publication_v46_interprocess_linux_test.go
+new file mode 100644
+index 0000000..146a79d
+--- /dev/null
++++ b/session/filesync/sealed_publication_v46_interprocess_linux_test.go
+@@ -0,0 +1,171 @@
++//go:build linux
++
++package filesync
++
++import (
++	"crypto/ed25519"
++	"crypto/rand"
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++// DEV-only replay and crash-fence test. Processes contend over the same
++// root-owned synthetic V40 ledger. No source FD, receiver, release, network
++// connection or production owner identity is involved in this fixture.
++func TestC1V46InterprocessClaimsAndDurableIntentFence(t *testing.T) {
++	if os.Getenv("VIRKI_V46_CHILD") == "claim" {
++		raw, err := base64.StdEncoding.DecodeString(os.Getenv("VIRKI_V46_CLAIM"))
++		require.NoError(t, err)
++		var c v39ChildClaim
++		require.NoError(t, json.Unmarshal(raw, &c))
++		if err := claimV39DurableTestOwnerPermit(c.Ledger, c.Manifest, c.Permit, c.Public, 7, 8); err != nil {
++			fmt.Println("V46_CLAIM_REFUSED")
++		} else {
++			fmt.Println("V46_CLAIM_ACCEPTED")
++		}
++		return
++	}
++	if os.Getenv("VIRKI_V46_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("explicit disposable V46 root fixture required")
++	}
++	base, err := os.MkdirTemp("/var/tmp", "virki-v46-claims-")
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
++	manifest := v15PacketManifest()
++	pub, private, err := ed25519.GenerateKey(rand.Reader)
++	require.NoError(t, err)
++	key := make([]byte, 32)
++	_, err = rand.Read(key)
++	require.NoError(t, err)
++	permit := v44TestPermit(manifest)
++	permit.ApprovalID = "v46-one-time-process-contended"
++	permit.Signature = ed25519.Sign(private, v15PermitBytes(permit))
++	self, err := os.Executable()
++	require.NoError(t, err)
++
++	provision := func(name string) (string, string, []byte) {
++		t.Helper()
++		ledger := filepath.Join(base, name)
++		trust := v40TrustDir(ledger)
++		require.NoError(t, os.Mkdir(ledger, 0700))
++		require.NoError(t, os.Mkdir(trust, 0700))
++		genesis := v40InitialCheckpoint(ledger, pub, key)
++		for _, item := range []struct {
++			path string
++			data []byte
++			mode os.FileMode
++		}{
++			{filepath.Join(ledger, v40LogName), nil, 0600},
++			{filepath.Join(trust, v40KeyName), key, 0400},
++			{filepath.Join(trust, v40CheckpointName), genesis, 0600},
++		} {
++			require.NoError(t, os.WriteFile(item.path, item.data, item.mode))
++			f, err := os.Open(item.path)
++			require.NoError(t, err)
++			require.NoError(t, f.Sync())
++			require.NoError(t, f.Close())
++		}
++		for _, path := range []string{ledger, trust} {
++			fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++			require.NoError(t, err)
++			require.NoError(t, unix.Fsync(fd))
++			require.NoError(t, unix.Close(fd))
++		}
++		return ledger, trust, genesis
++	}
++	claimChild := func(ledger string) (string, error) {
++		cfg, err := json.Marshal(v39ChildClaim{Ledger: ledger, Manifest: manifest, Permit: permit, Public: pub})
++		if err != nil {
++			return "", err
++		}
++		cmd := exec.Command(self, "-test.run=^TestC1V46InterprocessClaimsAndDurableIntentFence$")
++		cmd.Env = append(os.Environ(), "VIRKI_V46_CHILD=claim", "VIRKI_V46_CLAIM="+base64.StdEncoding.EncodeToString(cfg))
++		output, err := cmd.CombinedOutput()
++		return string(output), err
++	}
++
++	t.Run("six independent processes consume the same signed permit at most once", func(t *testing.T) {
++		ledger, trust, _ := provision("concurrent")
++		const contenders = 6
++		outputs := make(chan string, contenders)
++		errors := make(chan error, contenders)
++		var wg sync.WaitGroup
++		for i := 0; i < contenders; i++ {
++			wg.Add(1)
++			go func() {
++				defer wg.Done()
++				output, err := claimChild(ledger)
++				outputs <- output
++				errors <- err
++			}()
++		}
++		wg.Wait()
++		close(outputs)
++		close(errors)
++		for err := range errors {
++			require.NoError(t, err)
++		}
++		accepted, refused := 0, 0
++		for output := range outputs {
++			if strings.Contains(output, "V46_CLAIM_ACCEPTED") {
++				accepted++
++			} else if strings.Contains(output, "V46_CLAIM_REFUSED") {
++				refused++
++			} else {
++				t.Fatalf("claim process emitted no recognizable result: %q", output)
++			}
++		}
++		require.Equal(t, 1, accepted, "flock and authenticated replay must linearize cross-process claims")
++		require.Equal(t, contenders-1, refused)
++		log, err := os.ReadFile(filepath.Join(ledger, v40LogName))
++		require.NoError(t, err)
++		checkpoint, err := os.ReadFile(filepath.Join(trust, v40CheckpointName))
++		require.NoError(t, err)
++		claims, count, floor, _, err := v40VerifyHistory(log, checkpoint, ledger, pub, key)
++		require.NoError(t, err)
++		require.Len(t, claims, 1)
++		require.Equal(t, uint64(1), count)
++		require.Equal(t, uint64(7), floor)
++		_, err = os.Lstat(filepath.Join(trust, v40IntentName))
++		require.ErrorIs(t, err, os.ErrNotExist)
++	})
++
++	t.Run("fsynced pre-append intent blocks all claims after restart", func(t *testing.T) {
++		ledger, trust, genesis := provision("interrupted")
++		// Simulate a crash immediately AFTER durable intent creation and BEFORE
++		// appending any log record. A matching genesis checkpoint is not enough
++		// to self-repair or silently reuse an ambiguous owner authorization.
++		intent := filepath.Join(trust, v40IntentName)
++		require.NoError(t, os.WriteFile(intent, []byte("V40_INFLIGHT\n"), 0600))
++		f, err := os.Open(intent)
++		require.NoError(t, err)
++		require.NoError(t, f.Sync())
++		require.NoError(t, f.Close())
++		fd, err := unix.Open(trust, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++		require.NoError(t, err)
++		require.NoError(t, unix.Fsync(fd))
++		require.NoError(t, unix.Close(fd))
++		for i := 0; i < 2; i++ {
++			out, err := claimChild(ledger)
++			require.NoError(t, err)
++			require.Contains(t, out, "V46_CLAIM_REFUSED")
++			require.NotContains(t, out, "V46_CLAIM_ACCEPTED")
++		}
++		log, err := os.ReadFile(filepath.Join(ledger, v40LogName))
++		require.NoError(t, err)
++		require.Empty(t, log)
++		checkpoint, err := os.ReadFile(filepath.Join(trust, v40CheckpointName))
++		require.NoError(t, err)
++		require.Equal(t, genesis, checkpoint)
++	})
++}

@@ -11,6 +11,7 @@ import {
   verifyTrustedHostOfflineCandidate,
 } from "./trusted-host-entry.mjs";
 import { encodeCanonicalOfflineReleaseManifest } from "../../scripts/lib/offline-release-attestation.mjs";
+import { verifyOfflineDockerSaveTar } from "../../scripts/lib/offline-docker-tar-verifier.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const sha = (char) => char.repeat(40);
@@ -184,9 +185,25 @@ test("native trusted entry always rejects developer WSL kernel before opening bu
   }
 });
 
-test("native trust-root and non-classic OCI Docker save are not silently accepted", (t) => {
-  if (process.platform !== "linux" || /microsoft|wsl/iu.test(os.release())) {
-    t.skip("native-Linux-only installed trust and Docker archive verification cannot run on WSL kernel");
+test("a well-formed untrusted envelope never authenticates malformed runtime/migrator Docker archives", linuxCandidateOnly, async (t) => {
+  // The previous native-only fixture had no assertions at all on supported
+  // kernels. Prove the actual image-verifier boundary with disposable bytes
+  // on every Linux environment, without pretending the WSL kernel is a
+  // native installed trust root or introducing a synthetic release approval.
+  const f = fixture(t);
+  const candidate = await inspectUntrustedOfflineCandidate({ candidateDirectory: f.candidateDirectory });
+  assert.equal(candidate.status, "UNTRUSTED_ENVELOPE_ONLY");
+  for (const role of ["runtime", "migrator"]) {
+    const image = role === "runtime" ? f.manifest.runtime_image : f.manifest.migrator_image;
+    await assert.rejects(verifyOfflineDockerSaveTar({
+      role,
+      archivePath: candidate.archivePaths[role],
+      expectedImageId: image.image_id,
+      expectedRevision: f.manifest.source_sha,
+      expectedArchiveSha256: image.archive_sha256,
+      expectedArchiveSizeBytes: image.archive_size_bytes,
+    }), /Offline Docker TAR rejected/iu,
+    `${role}: hashes in an untrusted envelope are not image-format authorization`);
   }
 });
 

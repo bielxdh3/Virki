@@ -1,0 +1,146 @@
+diff --git a/session/filesync/sealed_publication_handoff_v37_linux.go b/session/filesync/sealed_publication_handoff_v37_linux.go
+index c2f748d..553ca2b 100644
+--- a/session/filesync/sealed_publication_handoff_v37_linux.go
++++ b/session/filesync/sealed_publication_handoff_v37_linux.go
+@@ -22,6 +22,28 @@ import (
+ // peer: a valid peer credential alone is not a C4 owner authorization.
+ //
+ // Neither this helper nor the broker is wired into a production RPC/service.
++// v50ArmPasscredBeforeAccept MUST run on the protected listener before its
++// socket path is opened to any sender. Linux SCM_CREDENTIALS is selected when
++// the sender queues the rights message, not retroactively at ReadMsgUnix.
++// Merely enabling SO_PASSCRED on the accepted socket after the message was
++// sent caused a legitimate positive handoff to fail on native Ubuntu CI.
++func v50ArmPasscredBeforeAccept(listener *net.UnixListener) error {
++	if listener == nil {
++		return errors.New("C1 V50 requires a protected Unix stream listener")
++	}
++	raw, err := listener.SyscallConn()
++	if err != nil {
++		return fmt.Errorf("C1 V50 cannot inspect listener: %w", err)
++	}
++	var enableErr error
++	if err := raw.Control(func(fd uintptr) {
++		enableErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_PASSCRED, 1)
++	}); err != nil || enableErr != nil {
++		return fmt.Errorf("C1 V50 cannot arm passcred before accept: %w", errors.Join(err, enableErr))
++	}
++	return nil
++}
++
+ func receiveV37AuthenticatedStageFD(conn *net.UnixConn, expectedPID int,
+ 	expectedUID, expectedGID uint32) (int, error) {
+ 	if conn == nil || os.Getuid() != 0 || os.Geteuid() != 0 || expectedPID <= 1 ||
+@@ -48,17 +70,19 @@ func receiveV37AuthenticatedStageFD(conn *net.UnixConn, expectedPID int,
+ 		return -1, fmt.Errorf("C1 V37 refused untrusted peer credentials: %w", err)
+ 	}
+ 	// SO_PEERCRED authenticates the socket CONNECTOR, not the process that
+-	// later transmits SCM_RIGHTS on an inherited socket. Request the kernel's
+-	// per-message SCM_CREDENTIALS and require the actual sender to match.
++	// later transmits SCM_RIGHTS on an inherited socket. The protected
++	// LISTENER must have pre-armed SO_PASSCRED; enabling it here is too late
++	// for data that reached the kernel before AcceptUnix on native Linux.
+ 	raw, err := conn.SyscallConn()
+ 	if err != nil {
+-		return -1, fmt.Errorf("C1 V49 cannot enable sender credentials: %w", err)
++		return -1, fmt.Errorf("C1 V50 cannot inspect sender credentials: %w", err)
+ 	}
+-	var enableErr error
++	var passcred int
++	var optionErr error
+ 	if err := raw.Control(func(fd uintptr) {
+-		enableErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_PASSCRED, 1)
+-	}); err != nil || enableErr != nil {
+-		return -1, fmt.Errorf("C1 V49 requires kernel sender credentials: %w", errors.Join(err, enableErr))
++		passcred, optionErr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_PASSCRED)
++	}); err != nil || optionErr != nil || passcred != 1 {
++		return -1, fmt.Errorf("C1 V50 requires pre-armed listener sender credentials (SO_PASSCRED): %w", errors.Join(err, optionErr))
+ 	}
+ 	// No unbounded client-controlled payload, descriptor count or waiting.
+ 	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+diff --git a/session/filesync/sealed_publication_handoff_v37_linux_test.go b/session/filesync/sealed_publication_handoff_v37_linux_test.go
+index 43a1d34..2dcd814 100644
+--- a/session/filesync/sealed_publication_handoff_v37_linux_test.go
++++ b/session/filesync/sealed_publication_handoff_v37_linux_test.go
+@@ -87,6 +87,7 @@ func TestC1V37AuthenticatedUnixRightsHandoff(t *testing.T) {
+ 			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+ 			require.NoError(t, err)
+ 			defer listener.Close()
++			require.NoError(t, v50ArmPasscredBeforeAccept(listener))
+ 			// The parent remains root-owned and not writable by the receiver,
+ 			// while the socket allows only this test's known synthetic GID.
+ 			require.NoError(t, os.Chown(sock, 0, int(receiverUID)))
+@@ -111,6 +112,7 @@ func TestC1V37AuthenticatedUnixRightsHandoff(t *testing.T) {
+ 			conn, err := listener.AcceptUnix()
+ 			require.NoError(t, err)
+ 			defer conn.Close()
++			v50AssertPasscredPrearmed(t, conn)
+ 			pid := cmd.Process.Pid
+ 			if tc.wrongPID {
+ 				pid++
+diff --git a/session/filesync/sealed_publication_ledger_v39_linux_test.go b/session/filesync/sealed_publication_ledger_v39_linux_test.go
+index 01557aa..8f93415 100644
+--- a/session/filesync/sealed_publication_ledger_v39_linux_test.go
++++ b/session/filesync/sealed_publication_ledger_v39_linux_test.go
+@@ -256,6 +256,7 @@ func TestC1V39DurableTestPermitAndAuthenticatedPublication(t *testing.T) {
+ 		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+ 		require.NoError(t, err)
+ 		defer listener.Close()
++		require.NoError(t, v50ArmPasscredBeforeAccept(listener))
+ 		require.NoError(t, os.Chown(sock, 0, int(uid)))
+ 		require.NoError(t, os.Chmod(sock, 0660))
+ 		cmd := exec.Command(helper, "-test.run=^TestC1V39DurableTestPermitAndAuthenticatedPublication$")
+@@ -275,6 +276,7 @@ func TestC1V39DurableTestPermitAndAuthenticatedPublication(t *testing.T) {
+ 		conn, err := listener.AcceptUnix()
+ 		require.NoError(t, err)
+ 		defer conn.Close()
++		v50AssertPasscredPrearmed(t, conn)
+ 		permit := sign("published-once", 7)
+ 		// The child has already connected and sent a directory FD. A wrong
+ 		// supervisor-pinned PID must be rejected WITHOUT consuming this permit
+diff --git a/session/filesync/sealed_publication_listener_v50_linux_test.go b/session/filesync/sealed_publication_listener_v50_linux_test.go
+new file mode 100644
+index 0000000..f1654de
+--- /dev/null
++++ b/session/filesync/sealed_publication_listener_v50_linux_test.go
+@@ -0,0 +1,28 @@
++//go:build linux
++
++package filesync
++
++import (
++	"net"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++// A passcred option enabled only after AcceptUnix is too late when SCM_RIGHTS
++// has already been queued; GitHub's native Ubuntu kernel reproduced this
++// false refusal, whereas WSL supplied credentials to the late receiver.
++// This invariant must be checked BEFORE the receiver can touch the socket.
++func v50AssertPasscredPrearmed(t *testing.T, conn *net.UnixConn) {
++	t.Helper()
++	raw, err := conn.SyscallConn()
++	require.NoError(t, err)
++	var value int
++	var socketErr error
++	require.NoError(t, raw.Control(func(fd uintptr) {
++		value, socketErr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_PASSCRED)
++	}))
++	require.NoError(t, socketErr)
++	require.Equal(t, 1, value, "trusted broker must arm SO_PASSCRED on the LISTENER before accepting an untrusted peer")
++}
+diff --git a/session/filesync/sealed_publication_peer_sender_v49_linux_test.go b/session/filesync/sealed_publication_peer_sender_v49_linux_test.go
+index 1db49dc..2e06129 100644
+--- a/session/filesync/sealed_publication_peer_sender_v49_linux_test.go
++++ b/session/filesync/sealed_publication_peer_sender_v49_linux_test.go
+@@ -97,6 +97,7 @@ func TestC1V49InheritedUnixSocketCannotSpendPermit(t *testing.T) {
+ 		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+ 		require.NoError(t, err)
+ 		t.Cleanup(func() { _ = listener.Close() })
++		require.NoError(t, v50ArmPasscredBeforeAccept(listener))
+ 		require.NoError(t, os.Chown(socketPath, 0, int(uid)))
+ 		require.NoError(t, os.Chmod(socketPath, 0660))
+ 		cmd := exec.Command(copied, "-test.run=^TestC1V49InheritedUnixSocketCannotSpendPermit$")

@@ -1,0 +1,356 @@
+diff --git a/session/filesync/sealed_publication_broker_v36_linux.go b/session/filesync/sealed_publication_broker_v36_linux.go
+new file mode 100644
+index 0000000..9972760
+--- /dev/null
++++ b/session/filesync/sealed_publication_broker_v36_linux.go
+@@ -0,0 +1,207 @@
++//go:build linux
++
++package filesync
++
++import (
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++	"path"
++	"path/filepath"
++	"strings"
++
++	"golang.org/x/sys/unix"
++)
++
++// publishV36RootOwnedSnapshot is an UNWIRED, DEV-only reference broker.
++// Its caller must ALREADY have authenticated the source FD and manifest under
++// independent trusted custody; this function does NOT authenticate a peer or
++// replace the C4 durable owner authorization/replay ledger. Never expose this
++// method as an untrusted RPC or activate it in protected production FileSync.
++//
++// Unlike same-UID publication, the final parent and stage are rooted in a
++// trusted 0700 root-owned directory. A malicious receiver UID cannot modify
++// the stage that gets renamed. It reads only approved source FD-relative files
++// into fresh root-owned inodes and checks the copied bytes before publication.
++func publishV36RootOwnedSnapshot(sourceRootFD int, expectedReceiverUID, expectedReceiverGID uint32,
++	dest string, manifest V15SealedManifest) error {
++	if os.Geteuid() != 0 || os.Getuid() != 0 || expectedReceiverUID == 0 || expectedReceiverGID == 0 ||
++		sourceRootFD < 0 || manifest.Digest == "" || v15ManifestDigest(manifest) != manifest.Digest ||
++		manifest.Bytes < 0 || manifest.Bytes > 64<<20 {
++		return errors.New("C1 V36 broker requires trusted root principal, nonroot source and frozen bounded manifest")
++	}
++	if !filepath.IsAbs(dest) || filepath.Clean(dest) != dest || dest == "/" {
++		return errors.New("C1 V36 broker requires a canonical absolute destination")
++	}
++	name, parent := filepath.Base(dest), filepath.Dir(dest)
++	if name == "." || name == ".." || strings.HasPrefix(name, ".virki-") {
++		return errors.New("C1 V36 refuses reserved destination")
++	}
++	if err := validateV15Request(V15SnapshotRequest{Root: "v36-pinned-untrusted-source",
++		ContextName: manifest.ContextName, WorkerID: manifest.WorkerID, SessionID: manifest.SessionID,
++		Nonce: manifest.Nonce, Files: manifest.Files}); err != nil {
++		return fmt.Errorf("C1 V36 invalid owner manifest path set: %w", err)
++	}
++	var sourceStat unix.Stat_t
++	if err := unix.Fstat(sourceRootFD, &sourceStat); err != nil {
++		return err
++	}
++	if sourceStat.Mode&unix.S_IFMT != unix.S_IFDIR || sourceStat.Uid != expectedReceiverUID ||
++		sourceStat.Gid != expectedReceiverGID || sourceStat.Mode&0077 != 0 {
++		return errors.New("C1 V36 requires a pinned, private receiver-owned source root")
++	}
++
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return err
++	}
++	defer unix.Close(rootFD)
++	if err := validateV24TrustedSupervisorAncestors(rootFD, parent); err != nil {
++		return fmt.Errorf("C1 V36 broker parent ancestry untrusted: %w", err)
++	}
++	parentFD, err := unix.Openat2(rootFD, strings.TrimPrefix(parent, "/"), &unix.OpenHow{
++		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
++	})
++	if err != nil {
++		return fmt.Errorf("C1 V36 broker cannot pin private owner parent: %w", err)
++	}
++	defer unix.Close(parentFD)
++	var parentStat unix.Stat_t
++	if err := unix.Fstat(parentFD, &parentStat); err != nil {
++		return err
++	}
++	if parentStat.Mode&unix.S_IFMT != unix.S_IFDIR || parentStat.Uid != 0 || parentStat.Mode&0777 != 0700 {
++		return errors.New("C1 V36 broker destination parent must be root-owned mode 0700")
++	}
++	var st unix.Stat_t
++	if err := unix.Fstatat(parentFD, name, &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
++		return errors.New("C1 V36 broker refuses preexisting destination")
++	} else if !errors.Is(err, unix.ENOENT) {
++		return err
++	}
++	var stageName string
++	for attempt := 0; attempt < 4; attempt++ {
++		var nonce [16]byte
++		if _, err := rand.Read(nonce[:]); err != nil {
++			return err
++		}
++		candidate := ".virki-v36-" + hex.EncodeToString(nonce[:])
++		if err := unix.Mkdirat(parentFD, candidate, 0700); err == nil {
++			stageName = candidate
++			break
++		} else if !errors.Is(err, unix.EEXIST) {
++			return err
++		}
++	}
++	if stageName == "" {
++		return errors.New("C1 V36 broker could not reserve private stage")
++	}
++	// Only the trusted root principal can mutate this parent. No untrusted UID
++	// can replace the new stage or redirect the rooted cleanup path.
++	stagePath := fmt.Sprintf("/proc/self/fd/%d/%s", parentFD, stageName)
++	defer func() { _ = os.RemoveAll(stagePath) }()
++	stageFD, err := unix.Openat(parentFD, stageName,
++		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return err
++	}
++	defer unix.Close(stageFD)
++
++	var copied int64
++	for _, pin := range manifest.Files {
++		if pin.Size < 0 || pin.Size > 16<<20 || path.Clean(pin.Path) != pin.Path ||
++			strings.HasPrefix(pin.Path, "/") || strings.ContainsRune(pin.Path, '\\') {
++			return errors.New("C1 V36 broker refuses unsafe manifest path or file budget")
++		}
++		copied += pin.Size
++		if copied > 64<<20 {
++			return errors.New("C1 V36 broker aggregate budget exceeded")
++		}
++		// The source is hostile and may be replaced while copying. openat2
++		// pins each regular source inode and refuses all symlink/mount escapes.
++		srcFD, err := unix.Openat2(sourceRootFD, pin.Path, &unix.OpenHow{
++			Flags:   uint64(unix.O_RDONLY | unix.O_NONBLOCK | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
++		})
++		if err != nil {
++			return fmt.Errorf("C1 V36 untrusted source path %q: %w", pin.Path, err)
++		}
++		var sourceFileStat unix.Stat_t
++		statErr := unix.Fstat(srcFD, &sourceFileStat)
++		if statErr != nil || sourceFileStat.Mode&unix.S_IFMT != unix.S_IFREG ||
++			sourceFileStat.Uid != expectedReceiverUID || sourceFileStat.Gid != expectedReceiverGID ||
++			sourceFileStat.Nlink != 1 || sourceFileStat.Size != pin.Size {
++			_ = unix.Close(srcFD)
++			return fmt.Errorf("C1 V36 source must be one exact receiver-owned regular inode: %q (%v)", pin.Path, statErr)
++		}
++		sourceFile := os.NewFile(uintptr(srcFD), pin.Path)
++		parts := strings.Split(pin.Path, "/")
++		for i := 1; i < len(parts); i++ {
++			directory := strings.Join(parts[:i], "/")
++			if err := unix.Mkdirat(stageFD, directory, 0700); err != nil && !errors.Is(err, unix.EEXIST) {
++				_ = sourceFile.Close()
++				return err
++			}
++		}
++		dstFD, err := unix.Openat2(stageFD, pin.Path, &unix.OpenHow{
++			Flags:   uint64(unix.O_WRONLY | unix.O_CREAT | unix.O_EXCL | unix.O_NOFOLLOW | unix.O_CLOEXEC),
++			Mode:    0600,
++			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
++		})
++		if err != nil {
++			_ = sourceFile.Close()
++			return err
++		}
++		output := os.NewFile(uintptr(dstFD), pin.Path)
++		h := sha256.New()
++		actual, copyErr := io.Copy(io.MultiWriter(output, h), io.LimitReader(sourceFile, pin.Size+1))
++		if copyErr == nil && (actual != pin.Size || fmt.Sprintf("sha256:%x", h.Sum(nil)) != pin.SHA256) {
++			copyErr = fmt.Errorf("C1 V36 copied bytes do not match the frozen digest for %q", pin.Path)
++		}
++		if copyErr == nil {
++			copyErr = output.Sync()
++		}
++		closeOut, closeSrc := output.Close(), sourceFile.Close()
++		if copyErr != nil {
++			return copyErr
++		}
++		if closeOut != nil {
++			return closeOut
++		}
++		if closeSrc != nil {
++			return closeSrc
++		}
++	}
++	if copied != manifest.Bytes {
++		return errors.New("C1 V36 copied total size mismatches frozen manifest")
++	}
++	// Verify the ROOT-OWNED copy, never the attacker's still-mutable original.
++	if err := verifyV23StageTreeFD(stageFD, manifest); err != nil {
++		return fmt.Errorf("C1 V36 protected copy membership refused: %w", err)
++	}
++	if err := verifyAndSyncV22Stage(stageFD, manifest); err != nil {
++		return fmt.Errorf("C1 V36 protected copy digest/fsync refused: %w", err)
++	}
++	if err := requireV23StageNameIdentity(parentFD, stageFD, stageName); err != nil {
++		return fmt.Errorf("C1 V36 private stage identity refused: %w", err)
++	}
++	// Both source and destination names are now in a root-owned 0700 parent.
++	// The untrusted receiver UID cannot race this final RENAME_NOREPLACE.
++	if err := unix.Renameat2(parentFD, stageName, parentFD, name, unix.RENAME_NOREPLACE); err != nil {
++		return fmt.Errorf("C1 V36 protected root-owner atomic publication rejected: %w", err)
++	}
++	if err := unix.Fsync(parentFD); err != nil {
++		return &V22PublishedButUnadmittedError{Destination: dest,
++			Cause: fmt.Errorf("C1 V36 parent fsync uncertain after publication: %w", err)}
++	}
++	if err := requireV23StageNameIdentity(parentFD, stageFD, name); err != nil {
++		return &V22PublishedButUnadmittedError{Destination: dest,
++			Cause: fmt.Errorf("C1 V36 published root-owned inode differs from verified copy: %w", err)}
++	}
++	return nil
++}
+diff --git a/session/filesync/sealed_publication_broker_v36_linux_test.go b/session/filesync/sealed_publication_broker_v36_linux_test.go
+new file mode 100644
+index 0000000..9ef0793
+--- /dev/null
++++ b/session/filesync/sealed_publication_broker_v36_linux_test.go
+@@ -0,0 +1,137 @@
++//go:build linux
++
++package filesync
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"testing"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++// This synthetic fixture never starts a broker listener or connects a real
++// FileSync endpoint. A root supervisor in an expendable Linux DEV namespace
++// is mandatory; do not run against actual user datasets or host custody paths.
++func TestC1V36RootBrokerCopiesIntoIndependentPublicationAuthority(t *testing.T) {
++	const uid = 60011
++	if os.Getenv("VIRKI_V36_RUN_ROOT_FIXTURE") != "1" || os.Geteuid() != 0 {
++		t.Skip("V36 root-owned publication authority requires opt-in isolated DEV root fixture")
++	}
++	// t.TempDir() nests underneath a root-owned 0700 Go test parent that a
++	// synthetic nonroot child cannot traverse. Use a fresh explicit /tmp path
++	// with a 0711 root-owned test parent, and clean only that exact temp path.
++	base, err := os.MkdirTemp("/tmp", "virki-v36-root-broker-")
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
++	require.NoError(t, os.Chmod(base, 0711))
++	source := filepath.Join(base, "source")
++	private := filepath.Join(base, "broker")
++	require.NoError(t, os.Mkdir(source, 0700))
++	require.NoError(t, os.Chown(source, uid, uid))
++	require.NoError(t, os.Mkdir(private, 0700))
++	file := filepath.Join(source, "app.js")
++	require.NoError(t, os.WriteFile(file, []byte("SAFE"), 0600))
++	require.NoError(t, os.Chown(file, uid, uid))
++	sourceFD, err := unix.Open(source, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
++	require.NoError(t, err)
++	defer unix.Close(sourceFD)
++	manifest := v15PacketManifest()
++	dest := filepath.Join(private, "published")
++	require.NoError(t, publishV36RootOwnedSnapshot(sourceFD, uid, uid, dest, manifest))
++	got, err := os.ReadFile(filepath.Join(dest, "app.js"))
++	require.NoError(t, err)
++	require.Equal(t, []byte("SAFE"), got)
++	var stat unix.Stat_t
++	require.NoError(t, unix.Stat(dest, &stat))
++	require.Zero(t, stat.Uid)
++	require.Equal(t, uint32(0700), stat.Mode&0777)
++
++	peerCommand := func(target string) *exec.Cmd {
++		cmd := exec.Command("/bin/sh", "-c", "printf EVIL > \"$1\"", "v36-peer", target)
++		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
++			Uid: uid, Gid: uid, Groups: []uint32{},
++		}}
++		return cmd
++	}
++	// Positive control: independently unprivileged same-UID receiver CAN
++	// mutate its own source after the trusted copy has been published.
++	output, err := peerCommand(file).CombinedOutput()
++	require.NoError(t, err, "same-UID source write baseline unexpectedly denied: %s", output)
++	srcChanged, err := os.ReadFile(file)
++	require.NoError(t, err)
++	require.Equal(t, []byte("EVIL"), srcChanged)
++	// Negative control: that same UID CANNOT rewrite the protected copy.
++	output, err = peerCommand(filepath.Join(dest, "app.js")).CombinedOutput()
++	require.Error(t, err, "same-UID peer unexpectedly wrote to root-owned publication: %s", output)
++	stillSafe, err := os.ReadFile(filepath.Join(dest, "app.js"))
++	require.NoError(t, err)
++	require.Equal(t, []byte("SAFE"), stillSafe)
++	// A new attempt to publish a now-mutated source must not create a final
++	// destination: the broker copies bytes and verifies the ROOT-owned copy.
++	unapproved := filepath.Join(private, "unapproved")
++	err = publishV36RootOwnedSnapshot(sourceFD, uid, uid, unapproved, manifest)
++	require.ErrorContains(t, err, "copied bytes do not match")
++	_, statErr := os.Lstat(unapproved)
++	require.ErrorIs(t, statErr, os.ErrNotExist)
++	// Same-host/same-UID hostile process rewrites its own source concurrently.
++	// Root-owned published output must be either manifest-exact or absent.
++	require.NoError(t, os.WriteFile(file, []byte("SAFE"), 0600))
++	racer := exec.Command("/bin/sh", "-c",
++		"i=0; while [ \"$i\" -lt 300 ]; do printf EVIL > \"$1\"; printf SAFE > \"$1\"; i=$((i+1)); done",
++		"v36-racer", file)
++	racer.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
++		Uid: uid, Gid: uid, Groups: []uint32{},
++	}}
++	require.NoError(t, racer.Start())
++	t.Cleanup(func() {
++		if racer.ProcessState == nil {
++			_ = racer.Process.Kill()
++			_ = racer.Wait()
++		}
++	})
++	for i := 0; i < 12; i++ {
++		candidate := filepath.Join(private, fmt.Sprintf("concurrent-%02d", i))
++		err := publishV36RootOwnedSnapshot(sourceFD, uid, uid, candidate, manifest)
++		if err != nil {
++			var terminal *V22PublishedButUnadmittedError
++			if !errors.As(err, &terminal) {
++				_, statErr := os.Lstat(candidate)
++				require.ErrorIs(t, statErr, os.ErrNotExist,
++					"rejected precommit source must not publish any destination")
++				continue
++			}
++		}
++		approved, readErr := os.ReadFile(filepath.Join(candidate, "app.js"))
++		require.NoError(t, readErr)
++		require.Equal(t, []byte("SAFE"), approved,
++			"only signed bytes may be copied into root-owned publication during same-UID source race")
++	}
++	require.NoError(t, racer.Wait(), "same-UID concurrency positive control must actually execute")
++	// A hostile symlink must never be followed out of the pinned source root.
++	require.NoError(t, os.Remove(file))
++	require.NoError(t, os.Symlink("/etc/hostname", file))
++	symlinkDest := filepath.Join(private, "symlink-denied")
++	err = publishV36RootOwnedSnapshot(sourceFD, uid, uid, symlinkDest, manifest)
++	require.ErrorContains(t, err, "untrusted source path")
++	_, statErr = os.Lstat(symlinkDest)
++	require.ErrorIs(t, statErr, os.ErrNotExist)
++
++	// The root broker refuses preexisting destinations and untrusted parents
++	// even when a caller tries to supply an otherwise valid manifest.
++	require.ErrorContains(t, publishV36RootOwnedSnapshot(sourceFD, uid, uid, dest, manifest), "preexisting destination")
++	badParent := filepath.Join(source, "attacker-owned-parent")
++	require.NoError(t, os.Mkdir(badParent, 0700))
++	require.NoError(t, os.Chown(badParent, uid, uid))
++	err = publishV36RootOwnedSnapshot(sourceFD, uid, uid, filepath.Join(badParent, "published"), manifest)
++	require.Error(t, err)
++	require.True(t, strings.Contains(err.Error(), "ancestor") || strings.Contains(err.Error(), "root-owned"))
++	_, statErr = os.Lstat(filepath.Join(badParent, "published"))
++	require.ErrorIs(t, statErr, os.ErrNotExist)
++}

@@ -7,3 +7,12 @@ buildkit-v0.34.1-c1-v28-supervisor-resource-hardening-dev-only.patch -text diff 
 buildkit-v0.34.1-c1-v29-trusted-ancestor-custody-dev-only.patch -text diff -whitespace
 buildkit-v0.34.1-c1-v30-helper-exec-fd-dev-only.patch -text diff -whitespace
 buildkit-v0.34.1-c1-v31-cross-uid-launcher-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v32-nondumpable-receiver-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v33-positive-controls-postcommit-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v34-ptrace-thread-pinning-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v35-final-published-identity-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v36-root-owned-broker-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v37-peercred-scmrights-broker-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v38-recovery-inspector-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v39-durable-test-permit-dev-only.patch -text diff -whitespace
+buildkit-v0.34.1-c1-v40-authenticated-rollback-fence-dev-only.patch -text diff -whitespace

@@ -1,0 +1,3256 @@
+diff --git a/cmd/buildkitd/config/config.go b/cmd/buildkitd/config/config.go
+index 3cabbe3..0557168 100644
+--- a/cmd/buildkitd/config/config.go
++++ b/cmd/buildkitd/config/config.go
+@@ -67,15 +67,28 @@ type Config struct {
+ // over a private Unix socket. Owner keys and the replay ledger remain outside
+ // buildkitd in that service.
+ type LocalContextObserverConfig struct {
+-	Required       bool    `toml:"required"`
+-	SocketPath     string  `toml:"socketPath"`
+-	SocketOwnerUID *uint32 `toml:"socketOwnerUID"`
++	Required               bool    `toml:"required"`
++	SocketPath             string  `toml:"socketPath"`
++	SocketOwnerUID         *uint32 `toml:"socketOwnerUID"`
++	Protocol               string  `toml:"protocol"`
++	Epoch                  uint64  `toml:"epoch"`
++	ApprovalPublicKeyFile  string  `toml:"approvalPublicKeyFile"`
++	ApprovalKeyID          string  `toml:"approvalKeyID"`
++	ApprovalPinSHA256      string  `toml:"approvalPinSHA256"`
++	ReceiptPublicKeyFile   string  `toml:"receiptPublicKeyFile"`
++	ReceiptKeyID           string  `toml:"receiptKeyID"`
++	ExpectedImageMediaType string  `toml:"expectedImageMediaType"`
++	ExpectedImageDigest    string  `toml:"expectedImageDigest"`
++	ExpectedImageSize      int64   `toml:"expectedImageSize"`
+ }
+ 
+ // Validate rejects partial observer configuration instead of silently
+ // allowing a required worker to run without the owner service.
+ func (c LocalContextObserverConfig) Validate() error {
+-	configured := c.Required || c.SocketPath != "" || c.SocketOwnerUID != nil
++	hasV3Fields := c.Epoch != 0 || c.ApprovalPublicKeyFile != "" || c.ApprovalKeyID != "" ||
++		c.ApprovalPinSHA256 != "" || c.ReceiptPublicKeyFile != "" || c.ReceiptKeyID != "" ||
++		c.ExpectedImageMediaType != "" || c.ExpectedImageDigest != "" || c.ExpectedImageSize != 0
++	configured := c.Required || c.SocketPath != "" || c.SocketOwnerUID != nil || c.Protocol != "" || hasV3Fields
+ 	if !configured {
+ 		return nil
+ 	}
+@@ -85,7 +98,32 @@ func (c LocalContextObserverConfig) Validate() error {
+ 	if c.SocketOwnerUID == nil {
+ 		return errors.New("worker.localContextObserver.socketOwnerUID is required")
+ 	}
+-	return nil
++	switch c.Protocol {
++	case "", "v1":
++		if hasV3Fields {
++			return errors.New("worker.localContextObserver V3 options require protocol = \"vroa-v3\"")
++		}
++		return nil
++	case "vroa-v3":
++		if c.Epoch == 0 {
++			return errors.New("worker.localContextObserver.epoch must be positive for vroa-v3")
++		}
++		if !filepath.IsAbs(c.ApprovalPublicKeyFile) || filepath.Clean(c.ApprovalPublicKeyFile) != c.ApprovalPublicKeyFile {
++			return errors.New("worker.localContextObserver.approvalPublicKeyFile must be absolute and canonical")
++		}
++		if c.ApprovalKeyID == "" || len(c.ApprovalPinSHA256) != 64 {
++			return errors.New("worker.localContextObserver.approvalKeyID and 64-hex approvalPinSHA256 are required for vroa-v3")
++		}
++		if c.ReceiptPublicKeyFile != "" && (!filepath.IsAbs(c.ReceiptPublicKeyFile) || filepath.Clean(c.ReceiptPublicKeyFile) != c.ReceiptPublicKeyFile) {
++			return errors.New("worker.localContextObserver.receiptPublicKeyFile must be absolute and canonical")
++		}
++		if c.ExpectedImageMediaType == "" || c.ExpectedImageDigest == "" || c.ExpectedImageSize <= 0 {
++			return errors.New("worker.localContextObserver expectedImageMediaType, expectedImageDigest and positive expectedImageSize are required for vroa-v3")
++		}
++		return nil
++	default:
++		return errors.New("worker.localContextObserver.protocol must be \"v1\" or \"vroa-v3\"")
++	}
+ }
+ 
+ type CompactionConfig struct {
+diff --git a/cmd/buildkitd/config/local_context_observer_test.go b/cmd/buildkitd/config/local_context_observer_test.go
+index 0a071c1..8070289 100644
+--- a/cmd/buildkitd/config/local_context_observer_test.go
++++ b/cmd/buildkitd/config/local_context_observer_test.go
+@@ -1,8 +1,31 @@
+ package config
+ 
+-import "testing"
++import (
++	"strings"
++	"testing"
++)
+ 
+ func TestLocalContextObserverConfigRequiresCompleteOwnerSocketPolicy(t *testing.T) {
++	validV3 := LocalContextObserverConfig{
++		Required:               true,
++		SocketPath:             "/run/virki/observer.sock",
++		SocketOwnerUID:         uint32Pointer(1000),
++		Protocol:               "vroa-v3",
++		Epoch:                  1,
++		ApprovalPublicKeyFile:  "/etc/virki/approval.pub",
++		ApprovalKeyID:          "owner-key-1",
++		ApprovalPinSHA256:      strings.Repeat("a", 64),
++		ExpectedImageMediaType: "application/vnd.oci.image.manifest.v1+json",
++		ExpectedImageDigest:    "sha256:" + strings.Repeat("b", 64),
++		ExpectedImageSize:      2048,
++	}
++	v1WithV3Fields := validV3
++	v1WithV3Fields.Protocol = "v1"
++	missingImg := validV3
++	missingImg.ExpectedImageSize = 0
++	badProto := validV3
++	badProto.Protocol = "v99"
++
+ 	tests := []struct {
+ 		name    string
+ 		config  LocalContextObserverConfig
+@@ -14,6 +37,10 @@ func TestLocalContextObserverConfigRequiresCompleteOwnerSocketPolicy(t *testing.
+ 		{name: "noncanonical socket", config: LocalContextObserverConfig{SocketPath: "/run/../run/virki/observer.sock", SocketOwnerUID: uint32Pointer(1000)}, wantErr: true},
+ 		{name: "missing owner uid", config: LocalContextObserverConfig{SocketPath: "/run/virki/observer.sock"}, wantErr: true},
+ 		{name: "complete owner socket", config: LocalContextObserverConfig{Required: true, SocketPath: "/run/virki/observer.sock", SocketOwnerUID: uint32Pointer(1000)}},
++		{name: "complete vroa-v3 config", config: validV3},
++		{name: "v1 rejects vroa-v3 fields", config: v1WithV3Fields, wantErr: true},
++		{name: "vroa-v3 rejects missing expected image size", config: missingImg, wantErr: true},
++		{name: "unknown protocol rejected", config: badProto, wantErr: true},
+ 	}
+ 	for _, test := range tests {
+ 		t.Run(test.name, func(t *testing.T) {
+diff --git a/cmd/buildkitd/main.go b/cmd/buildkitd/main.go
+index 26016b3..f935d7f 100644
+--- a/cmd/buildkitd/main.go
++++ b/cmd/buildkitd/main.go
+@@ -1012,13 +1012,63 @@ func newLocalContextObserver(cfg config.LocalContextObserverConfig) (*localconte
+ 	if cfg.SocketOwnerUID == nil {
+ 		return nil, errors.New("owner local-context observer socket UID is missing")
+ 	}
+-	service, err := localcontext.NewUnixSocketService(cfg.SocketPath, *cfg.SocketOwnerUID)
++	var service localcontext.Service
++	var err error
++	switch cfg.Protocol {
++	case "", "v1":
++		service, err = localcontext.NewUnixSocketService(cfg.SocketPath, *cfg.SocketOwnerUID)
++	case "vroa-v3":
++		approvalPub, loadErr := readEd25519PublicKeyFile(cfg.ApprovalPublicKeyFile)
++		if loadErr != nil {
++			return nil, loadErr
++		}
++		var receiptPub []byte
++		if cfg.ReceiptPublicKeyFile != "" {
++			receiptPub, loadErr = readEd25519PublicKeyFile(cfg.ReceiptPublicKeyFile)
++			if loadErr != nil {
++				return nil, loadErr
++			}
++		}
++		service, err = localcontext.NewVROAV3Service(cfg.SocketPath, *cfg.SocketOwnerUID, localcontext.VROAV3Options{
++			Epoch:             cfg.Epoch,
++			ApprovalPublicKey: approvalPub,
++			ApprovalKeyID:     cfg.ApprovalKeyID,
++			ApprovalPinSHA256: cfg.ApprovalPinSHA256,
++			ReceiptPublicKey:  receiptPub,
++			ReceiptKeyID:      cfg.ReceiptKeyID,
++			ExpectedImage: localcontext.ImageDescriptor{
++				MediaType: cfg.ExpectedImageMediaType,
++				Digest:    cfg.ExpectedImageDigest,
++				Size:      cfg.ExpectedImageSize,
++			},
++		})
++	default:
++		return nil, errors.New("unsupported local-context observer protocol")
++	}
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	return localcontext.NewManager(service, cfg.Required)
+ }
+ 
++func readEd25519PublicKeyFile(path string) ([]byte, error) {
++	info, err := os.Lstat(path)
++	if err != nil {
++		return nil, err
++	}
++	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() != 32 {
++		return nil, errors.New("Ed25519 public key file must be a 32-byte regular non-symlink file")
++	}
++	raw, err := os.ReadFile(path)
++	if err != nil {
++		return nil, err
++	}
++	if len(raw) != 32 {
++		return nil, errors.New("Ed25519 public key file must be exactly 32 bytes")
++	}
++	return raw, nil
++}
++
+ func configureWorkerContextObserver(opt *base.WorkerOpt, observer *localcontext.Manager, required bool) error {
+ 	if opt == nil {
+ 		return errors.New("worker options are missing")
+diff --git a/cmd/virki-c1-dev-stream/main.go b/cmd/virki-c1-dev-stream/main.go
+new file mode 100644
+index 0000000..0cfa85d
+--- /dev/null
++++ b/cmd/virki-c1-dev-stream/main.go
+@@ -0,0 +1,44 @@
++// A DEV-only read-only bridge from BuildKit's actual worker-side context
++// stream producer to the isolated C4 test. It never authorizes FileSync,
++// publishes an image, issues a receipt, or runs a daemon.
++package main
++
++import (
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"os"
++
++	"github.com/moby/buildkit/session/filesync"
++)
++
++func main() {
++	if len(os.Args) != 3 {
++		fmt.Fprintln(os.Stderr, "usage: virki-c1-dev-stream <physical-directory> <canonical-context-name>")
++		os.Exit(2)
++	}
++	observation, stream, err := filesync.BuildLocalContextStream(os.Args[1], os.Args[2], filesync.MaxLocalContextStreamBytes)
++	if err != nil {
++		fmt.Fprintln(os.Stderr, "BuildKit C1 physical stream:", err)
++		os.Exit(1)
++	}
++	proof := struct {
++		Name             string
++		TreeDigest       string
++		StreamDigest     string
++		StreamBase64     string
++		RegularFileBytes int64
++		EntryCount       int
++	}{
++		Name:             observation.Name,
++		TreeDigest:       observation.TreeDigest,
++		StreamDigest:     observation.StreamDigest,
++		StreamBase64:     base64.StdEncoding.EncodeToString(stream),
++		RegularFileBytes: observation.RegularFileBytes,
++		EntryCount:       observation.EntryCount,
++	}
++	if err := json.NewEncoder(os.Stdout).Encode(proof); err != nil {
++		fmt.Fprintln(os.Stderr, "encode DEV C1 stream:", err)
++		os.Exit(1)
++	}
++}
+diff --git a/exporter/containerimage/export.go b/exporter/containerimage/export.go
+index 7830b21..11910a3 100644
+--- a/exporter/containerimage/export.go
++++ b/exporter/containerimage/export.go
+@@ -222,6 +222,15 @@ func IsNonPublishingExporterInstance(instance exporter.ExporterInstance) bool {
+ 		i.danglingPrefix == "" && len(i.meta) == 0
+ }
+ 
++// LocalContextContentStore exposes the actual anonymous exporter content, only
++// for the already restricted non-publishing local-context integration.
++func LocalContextContentStore(instance exporter.ExporterInstance) (content.Provider, error) {
++	if !IsNonPublishingExporterInstance(instance) {
++		return nil, errors.New("local-context OCI evidence requires a non-publishing image exporter")
++	}
++	return instance.(*imageExporterInstance).opt.ImageWriter.ContentStore(), nil
++}
++
+ func (e *imageExporterInstance) ID() int {
+ 	return e.id
+ }
+diff --git a/session/filesync/localcontext.go b/session/filesync/localcontext.go
+index 25f6db2..076ebb4 100644
+--- a/session/filesync/localcontext.go
++++ b/session/filesync/localcontext.go
+@@ -1,6 +1,7 @@
+ package filesync
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"crypto/sha256"
+ 	"encoding/binary"
+@@ -11,7 +12,11 @@ import (
+ 	"path/filepath"
+ )
+ 
+-const LocalContextTreeDigestSchema = "buildkit-worker-local-context-v2"
++const (
++	LocalContextTreeDigestSchema = "buildkit-worker-local-context-v2"
++	LocalContextStreamSchema     = "virki-context-stream-v1"
++	MaxLocalContextStreamBytes   = int64(64 * 1024 * 1024)
++)
+ 
+ // LocalContextObservation describes the tree present in the worker destination
+ // after a successful FileSync receive. RegularFileBytes excludes symlink target
+@@ -20,6 +25,8 @@ type LocalContextObservation struct {
+ 	Name             string
+ 	TreeDigestSchema string
+ 	TreeDigest       string
++	StreamDigest     string
++	StreamLength     int64
+ 	RegularFileBytes int64
+ 	EntryCount       int
+ }
+@@ -29,20 +36,43 @@ type LocalContextObserver func(context.Context, LocalContextObservation) error
+ // ObserveLocalContext measures an existing worker-side destination tree using
+ // the canonical local-context digest format.
+ func ObserveLocalContext(root, name string) (LocalContextObservation, error) {
+-	return observeLocalContext(root, name)
++	obs, _, err := observeLocalContextImpl(root, name, false, 0)
++	return obs, err
++}
++
++// BuildLocalContextStream measures an existing worker-side destination tree and
++// emits its deterministic linear stream bounded by maxBytes.
++func BuildLocalContextStream(root, name string, maxBytes int64) (LocalContextObservation, []byte, error) {
++	if maxBytes <= 0 || maxBytes > MaxLocalContextStreamBytes {
++		maxBytes = MaxLocalContextStreamBytes
++	}
++	return observeLocalContextImpl(root, name, true, maxBytes)
+ }
+ 
+ func observeLocalContext(root, name string) (LocalContextObservation, error) {
++	obs, _, err := observeLocalContextImpl(root, name, false, 0)
++	return obs, err
++}
++
++func observeLocalContextImpl(root, name string, captureStream bool, maxBytes int64) (LocalContextObservation, []byte, error) {
+ 	rootInfo, err := os.Lstat(root)
+ 	if err != nil {
+-		return LocalContextObservation{}, err
++		return LocalContextObservation{}, nil, err
+ 	}
+ 	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+-		return LocalContextObservation{}, fmt.Errorf("local-source destination is not a real directory")
++		return LocalContextObservation{}, nil, fmt.Errorf("local-source destination is not a real directory")
+ 	}
+ 
+ 	treeHash := sha256.New()
+ 	_, _ = treeHash.Write([]byte(LocalContextTreeDigestSchema + "\x00"))
++	var streamBuf bytes.Buffer
++	if captureStream {
++		_, _ = streamBuf.WriteString(LocalContextStreamSchema + "\x00")
++		writeSized(&streamBuf, []byte(name))
++		if int64(streamBuf.Len()) > maxBytes {
++			return LocalContextObservation{}, nil, fmt.Errorf("local-source stream exceeds %d bytes", maxBytes)
++		}
++	}
+ 	observation := LocalContextObservation{Name: name, TreeDigestSchema: LocalContextTreeDigestSchema}
+ 	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+ 		if walkErr != nil {
+@@ -67,6 +97,11 @@ func observeLocalContext(root, name string) (LocalContextObservation, error) {
+ 			_, _ = treeHash.Write([]byte{'D'})
+ 			writeSized(treeHash, []byte(relative))
+ 			writeUint64(treeHash, mode)
++			if captureStream {
++				_ = streamBuf.WriteByte('D')
++				writeSized(&streamBuf, []byte(relative))
++				writeUint64(&streamBuf, mode)
++			}
+ 		case info.Mode()&os.ModeSymlink != 0:
+ 			target, err := os.Readlink(path)
+ 			if err != nil {
+@@ -76,6 +111,12 @@ func observeLocalContext(root, name string) (LocalContextObservation, error) {
+ 			writeSized(treeHash, []byte(relative))
+ 			writeUint64(treeHash, mode)
+ 			writeSized(treeHash, []byte(target))
++			if captureStream {
++				_ = streamBuf.WriteByte('L')
++				writeSized(&streamBuf, []byte(relative))
++				writeUint64(&streamBuf, mode)
++				writeSized(&streamBuf, []byte(target))
++			}
+ 		case info.Mode().IsRegular():
+ 			// Never block opening a file that raced into a FIFO. The Linux
+ 			// opener uses O_NONBLOCK | O_NOFOLLOW and the fstat below checks
+@@ -93,8 +134,22 @@ func observeLocalContext(root, name string) (LocalContextObservation, error) {
+ 				_ = file.Close()
+ 				return fmt.Errorf("local-source file changed while measuring %q", relative)
+ 			}
++			if captureStream {
++				if info.Size() < 0 || info.Size() > maxBytes || int64(streamBuf.Len()) > maxBytes-info.Size()-int64(len(relative))-25 {
++					_ = file.Close()
++					return fmt.Errorf("local-source stream exceeds %d bytes at %q", maxBytes, relative)
++				}
++				_ = streamBuf.WriteByte('F')
++				writeSized(&streamBuf, []byte(relative))
++				writeUint64(&streamBuf, mode)
++				writeUint64(&streamBuf, uint64(info.Size()))
++			}
+ 			contentHash := sha256.New()
+-			size, copyErr := io.Copy(contentHash, file)
++			var dst io.Writer = contentHash
++			if captureStream {
++				dst = io.MultiWriter(contentHash, &streamBuf)
++			}
++			size, copyErr := io.Copy(dst, file)
+ 			measuredInfo, statErr := file.Stat()
+ 			closeErr := file.Close()
+ 			if copyErr != nil {
+@@ -122,16 +177,26 @@ func observeLocalContext(root, name string) (LocalContextObservation, error) {
+ 		default:
+ 			return fmt.Errorf("unsupported local-source file type at %q", relative)
+ 		}
++		if captureStream && int64(streamBuf.Len()) > maxBytes {
++			return fmt.Errorf("local-source stream exceeds %d bytes", maxBytes)
++		}
+ 		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+ 			observation.EntryCount++
+ 		}
+ 		return nil
+ 	})
+ 	if err != nil {
+-		return LocalContextObservation{}, err
++		return LocalContextObservation{}, nil, err
+ 	}
+ 	observation.TreeDigest = "sha256:" + hex.EncodeToString(treeHash.Sum(nil))
+-	return observation, nil
++	if captureStream {
++		streamBytes := streamBuf.Bytes()
++		sum := sha256.Sum256(streamBytes)
++		observation.StreamDigest = "sha256:" + hex.EncodeToString(sum[:])
++		observation.StreamLength = int64(len(streamBytes))
++		return observation, streamBytes, nil
++	}
++	return observation, nil, nil
+ }
+ 
+ func writeSized(h io.Writer, value []byte) {
+diff --git a/session/filesync/localcontext_open_linux_test.go b/session/filesync/localcontext_open_linux_test.go
+index 58f38a8..1cbf820 100644
+--- a/session/filesync/localcontext_open_linux_test.go
++++ b/session/filesync/localcontext_open_linux_test.go
+@@ -81,3 +81,28 @@ func TestLocalContextOpenRejectsIntermediateSymlinkWithoutReading(t *testing.T)
+ 		t.Fatal("intermediate symlink did not fail closed")
+ 	}
+ }
++
++func TestBuildLocalContextStreamDeterministicAndBounded(t *testing.T) {
++	dir := t.TempDir()
++	if err := os.Mkdir(filepath.Join(dir, "sub"), 0755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(dir, "sub", "hello.txt"), []byte("virki-stream-content"), 0644); err != nil {
++		t.Fatal(err)
++	}
++	obs1, stream1, err := BuildLocalContextStream(dir, "source", MaxLocalContextStreamBytes)
++	if err != nil {
++		t.Fatal(err)
++	}
++	obs2, stream2, err := BuildLocalContextStream(dir, "source", MaxLocalContextStreamBytes)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if obs1.TreeDigest != obs2.TreeDigest || obs1.StreamDigest != obs2.StreamDigest ||
++		obs1.StreamLength != int64(len(stream1)) || string(stream1) != string(stream2) {
++		t.Fatalf("non-deterministic local context stream: %+v vs %+v", obs1, obs2)
++	}
++	if _, _, err := BuildLocalContextStream(dir, "source", 16); err == nil {
++		t.Fatal("expected stream size bound error")
++	}
++}
+diff --git a/session/filesync/sealed_publication_v51_v3_linux.go b/session/filesync/sealed_publication_v51_v3_linux.go
+new file mode 100644
+index 0000000..f153f15
+--- /dev/null
++++ b/session/filesync/sealed_publication_v51_v3_linux.go
+@@ -0,0 +1,150 @@
++//go:build linux && virki_c1c4_dev
++
++package filesync
++
++import (
++	"context"
++	"crypto/ed25519"
++	"errors"
++	"fmt"
++	"net"
++	"os"
++	"path/filepath"
++
++	"github.com/moby/buildkit/util/localcontext"
++	"golang.org/x/sys/unix"
++)
++
++// PublishV51DevContextToV3 is a deliberately DEV-build-tagged composition of
++// the REAL V50 authenticated-SCM_RIGHTS/V40 durable-claim/V36 root publisher
++// and the REAL V3 Manager.ContextConsumed admission point.
++//
++// The V15 permit remains a synthetic C1 test-domain permit: it is NOT a C4
++// owner approval. The caller MUST independently BeginSolve with the V3
++// service and an actual V3-domain approval before calling this function.
++// This function never signs, exports an image, completes a solve, deploys, or
++// returns an owner authorization. Production builds do not contain it.
++//
++// The solver-provided vertex/snapshot metadata is not independently proven
++// here. A later actual solver/OCI proof is still mandatory for C4 completion.
++func PublishV51DevContextToV3(ctx context.Context, manager *localcontext.Manager,
++	ledgerDir string, conn *net.UnixConn, expectedPID int,
++	expectedUID, expectedGID uint32, dest string, manifest V15SealedManifest,
++	permit V15OwnerPermit, trustedV15Public ed25519.PublicKey,
++	minimumEpoch, maximumEpoch uint64, record localcontext.Consumption) error {
++	if ctx == nil || manager == nil || conn == nil || os.Getuid() != 0 || os.Geteuid() != 0 {
++		return errors.New("V51 DEV requires an authorized solve context, Manager, accepted peer and root broker")
++	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	if record.Name != manifest.ContextName || record.WorkerID != manifest.WorkerID ||
++		record.SessionID != manifest.SessionID || record.Name == "" {
++		return errors.New("V51 DEV worker/context/session differs from frozen V15 manifest")
++	}
++	// No bytes from the receiver and no user-controlled FD are passed to V3
++	// directly. V39 first consumes the V40 permit and V36 publishes a fresh
++	// root-owned verified copy in a separately protected directory.
++	if err := publishV39FromAuthorizedTestPeer(ledgerDir, conn, expectedPID, expectedUID,
++		expectedGID, dest, manifest, permit, trustedV15Public, minimumEpoch, maximumEpoch); err != nil {
++		return fmt.Errorf("V51 DEV protected V50 publication refused: %w", err)
++	}
++	observation, stream, err := v51MeasureProtectedPublication(dest, manifest)
++	if err != nil {
++		// The V40 permit is already consumed: never retry automatically.
++		return fmt.Errorf("V51 DEV published but not V3-admitted, new authorization required: %w", err)
++	}
++	if record.TreeDigest != "" && record.TreeDigest != observation.TreeDigest ||
++		record.StreamDigest != "" && record.StreamDigest != observation.StreamDigest ||
++		record.StreamLength != 0 && record.StreamLength != observation.StreamLength ||
++		record.RegularFileBytes != 0 && record.RegularFileBytes != observation.RegularFileBytes ||
++		record.EntryCount != 0 && record.EntryCount != observation.EntryCount {
++		return errors.New("V51 DEV caller metadata differs from measured root-owned publication")
++	}
++	record.TreeDigestSchema = observation.TreeDigestSchema
++	record.TreeDigest = observation.TreeDigest
++	record.StreamDigest = observation.StreamDigest
++	record.StreamLength = observation.StreamLength
++	record.StreamBytes = stream
++	record.RegularFileBytes = observation.RegularFileBytes
++	record.EntryCount = observation.EntryCount
++	if err := manager.ContextConsumed(ctx, record); err != nil {
++		// On V3 rejection the V40 claim remains consumed and the protected
++		// destination remains inert; we do not try to undo durable authority.
++		return fmt.Errorf("V51 DEV published bytes refused by independently authorized V3 scope: %w", err)
++	}
++	return nil
++}
++
++// v51MeasureProtectedPublication pins the exact V36 output after the final
++// durable commit and checks exact manifest membership before and after the
++// physical stream read. Every ancestor and the immediate parent are protected
++// from nonroot rename; the source FD never enters this call. The root owner
++// itself is trusted only within the explicitly isolated DEV threat model.
++func v51MeasureProtectedPublication(dest string, manifest V15SealedManifest) (LocalContextObservation, []byte, error) {
++	if os.Getuid() != 0 || os.Geteuid() != 0 || !filepath.IsAbs(dest) ||
++		filepath.Clean(dest) != dest || dest == "/" ||
++		manifest.Digest == "" || manifest.Digest != v15ManifestDigest(manifest) {
++		return LocalContextObservation{}, nil, errors.New("V51 DEV requires root, canonical destination and frozen V15 manifest")
++	}
++	parent, name := filepath.Dir(dest), filepath.Base(dest)
++	rootFD, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return LocalContextObservation{}, nil, err
++	}
++	defer unix.Close(rootFD)
++	if err := validateV24TrustedSupervisorAncestors(rootFD, parent); err != nil {
++		return LocalContextObservation{}, nil, err
++	}
++	parentFD, err := v38OpenRootRecoveryDirectory(rootFD, parent)
++	if err != nil {
++		return LocalContextObservation{}, nil, fmt.Errorf("V51 DEV publication parent not pinned: %w", err)
++	}
++	defer unix.Close(parentFD)
++	var parentStat unix.Stat_t
++	if err := unix.Fstat(parentFD, &parentStat); err != nil {
++		return LocalContextObservation{}, nil, err
++	}
++	if parentStat.Mode&unix.S_IFMT != unix.S_IFDIR || parentStat.Uid != 0 ||
++		parentStat.Mode&07777 != 0700 {
++		return LocalContextObservation{}, nil, errors.New("V51 DEV publication parent is not root-only")
++	}
++	fd, err := v38OpenRootRecoveryDirectory(parentFD, name)
++	if err != nil {
++		return LocalContextObservation{}, nil, fmt.Errorf("V51 DEV published root is not a pinned protected directory: %w", err)
++	}
++	defer unix.Close(fd)
++	var st unix.Stat_t
++	if err := unix.Fstat(fd, &st); err != nil {
++		return LocalContextObservation{}, nil, err
++	}
++	if st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Uid != 0 || st.Mode&07777 != 0700 {
++		return LocalContextObservation{}, nil, errors.New("V51 DEV published directory is not root-owned 0700")
++	}
++	verify := func() error {
++		if err := requireV23StageNameIdentity(parentFD, fd, name); err != nil {
++			return err
++		}
++		if err := verifyV23StageTreeFD(fd, manifest); err != nil {
++			return err
++		}
++		return verifyAndSyncV22Stage(fd, manifest)
++	}
++	if err := verify(); err != nil {
++		return LocalContextObservation{}, nil, fmt.Errorf("V51 DEV protected publication prestream verification refused: %w", err)
++	}
++	// This pathname is in a verified root-only parent, with a pinned root FD.
++	// The stream never comes from the mutable receiver's original source.
++	observation, stream, err := BuildLocalContextStream(dest, manifest.ContextName, MaxLocalContextStreamBytes)
++	if err != nil {
++		return LocalContextObservation{}, nil, err
++	}
++	if err := verify(); err != nil {
++		return LocalContextObservation{}, nil, fmt.Errorf("V51 DEV protected publication poststream verification refused: %w", err)
++	}
++	if observation.RegularFileBytes != manifest.Bytes || observation.EntryCount < len(manifest.Files) ||
++		int64(len(stream)) != observation.StreamLength || len(stream) == 0 {
++		return LocalContextObservation{}, nil, errors.New("V51 DEV published context stream does not match V15 file budget")
++	}
++	return observation, stream, nil
++}
+diff --git a/session/filesync/sealed_publication_v51_v3_linux_test.go b/session/filesync/sealed_publication_v51_v3_linux_test.go
+new file mode 100644
+index 0000000..8eddd95
+--- /dev/null
++++ b/session/filesync/sealed_publication_v51_v3_linux_test.go
+@@ -0,0 +1,308 @@
++//go:build linux && virki_c1c4_dev
++
++package filesync
++
++import (
++	"context"
++	"crypto/ed25519"
++	"crypto/rand"
++	"encoding/base64"
++	"errors"
++	"io"
++	"net"
++	"os"
++	"os/exec"
++	"os/user"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/moby/buildkit/util/localcontext"
++	"golang.org/x/sys/unix"
++)
++
++// v51DEVScope is an intentionally TEST-ONLY owner double to exercise the
++// real Manager.ContextConsumed call after V39/V36. It CANNOT sign a C4
++// candidate; the real VROA_V3 native daemon is tested independently.
++type v51DEVScope struct{ auth localcontext.Authorization }
++
++func (s *v51DEVScope) Begin(_ context.Context, _ localcontext.Binding) (localcontext.Authorization, error) {
++	return s.auth, nil
++}
++func (s *v51DEVScope) Complete(_ context.Context, _ localcontext.Completion) error {
++	return errors.New("V51 fixture deliberately forbids C4 candidate completion")
++}
++func (s *v51DEVScope) Abort(_ context.Context, _, _ string) error { return nil }
++
++func TestC1V51RealProtectedPublisherFeedsV3Manager(t *testing.T) {
++	const uid uint32 = 60018
++	const content = "V51-PHYSICAL-PROTECTED-BYTES"
++	if os.Getenv("VIRKI_V51_TEST_CHILD") == "sender" {
++		if os.Getuid() != int(uid) {
++			t.Fatal("V51 sender not launched with the independently pinned UID")
++		}
++		source, err := os.Open(os.Getenv("VIRKI_V51_SOURCE"))
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer source.Close()
++		conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: os.Getenv("VIRKI_V51_SOCKET"), Net: "unix"})
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer conn.Close()
++		if _, _, err := conn.WriteMsgUnix([]byte{'V'}, unix.UnixRights(int(source.Fd())), nil); err != nil {
++			t.Fatal(err)
++		}
++		return
++	}
++	if os.Getenv("VIRKI_V51_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("requires explicitly opted-in disposable Linux root V51 publication")
++	}
++	if _, err := user.LookupId(strconv.FormatUint(uint64(uid), 10)); err == nil {
++		t.Skip("V51 synthetic sender UID already belongs to an actual user")
++	}
++	base, err := os.MkdirTemp("/var/tmp", "virki-v51-dev-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = os.RemoveAll(base) })
++	if err := os.Chmod(base, 0711); err != nil {
++		t.Fatal(err)
++	}
++	protected := filepath.Join(base, "protected")
++	source := filepath.Join(base, "sender-source")
++	ledger := filepath.Join(base, "ledger")
++	for _, dir := range []string{protected, source, ledger, v40TrustDir(ledger)} {
++		if err := os.Mkdir(dir, 0700); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if err := os.WriteFile(filepath.Join(source, "app.js"), []byte(content), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(filepath.Join(source, "app.js"), int(uid), int(uid)); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(source, int(uid), int(uid)); err != nil {
++		t.Fatal(err)
++	}
++	manifest := V15SealedManifest{
++		Schema: "virki-c1-v15-memory-fs-1", ContextName: "source",
++		WorkerID: "worker-v51", SessionID: "sess-source",
++		Nonce: strings.Repeat("a", 32),
++		Files: []V15FilePin{{Path: "app.js", SHA256: v15Hash([]byte(content)), Size: int64(len(content))}},
++		Bytes: int64(len(content)),
++	}
++	manifest.Digest = v15ManifestDigest(manifest)
++	pub, priv, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	macKey := make([]byte, 32)
++	if _, err := rand.Read(macKey); err != nil {
++		t.Fatal(err)
++	}
++	trust := v40TrustDir(ledger)
++	for path, data := range map[string][]byte{
++		filepath.Join(ledger, v40LogName):       nil,
++		filepath.Join(trust, v40KeyName):        macKey,
++		filepath.Join(trust, v40CheckpointName): v40InitialCheckpoint(ledger, pub, macKey),
++	} {
++		mode := os.FileMode(0600)
++		if filepath.Base(path) == v40KeyName {
++			mode = 0400
++		}
++		if err := os.WriteFile(path, data, mode); err != nil {
++			t.Fatal(err)
++		}
++		f, err := os.Open(path)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := f.Sync(); err != nil {
++			t.Fatal(err)
++		}
++		if err := f.Close(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	for _, dir := range []string{trust, ledger} {
++		fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := unix.Fsync(fd); err != nil {
++			t.Fatal(err)
++		}
++		_ = unix.Close(fd)
++	}
++	permit := V15OwnerPermit{
++		Domain: V15OwnerDomain, ApprovalID: "v51-test-only",
++		ManifestDigest: manifest.Digest, WorkerID: manifest.WorkerID,
++		SessionID: manifest.SessionID, ContextName: manifest.ContextName,
++		Nonce: manifest.Nonce, Epoch: 7, ExpiresUnix: time.Now().Add(time.Hour).Unix(),
++	}
++	permit.Signature = ed25519.Sign(priv, v15PermitBytes(permit))
++
++	// Expected owner tree is measured INDEPENDENTLY before receiving a sender
++	// FD; the actual source of data for the V3 record remains the V36 copy.
++	reference := filepath.Join(protected, "owner-expected")
++	if err := os.Mkdir(reference, 0700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(reference, "app.js"), []byte(content), 0600); err != nil {
++		t.Fatal(err)
++	}
++	expected, expectedStream, err := BuildLocalContextStream(reference, "source", MaxLocalContextStreamBytes)
++	if err != nil {
++		t.Fatal(err)
++	}
++	intent, err := localcontext.NewExporterIntent("image", 0, map[string]string{"name": "127.0.0.1:5000/virki/v51:dev"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	identities, treeDigests, sessions := make(map[string]string), make(map[string]string), make(map[string]string)
++	for _, name := range localcontext.RequiredContextNames() {
++		identities[name] = "ctxid-" + name
++		treeDigests[name] = expected.TreeDigest
++		sessions[name] = "sess-" + name
++	}
++	auth := localcontext.Authorization{
++		Token: "dev-v51-test-scope", Generation: manifest.Nonce, WorkerID: manifest.WorkerID,
++		ContextIdentities: identities, ContextTreeDigestSchema: expected.TreeDigestSchema,
++		ContextTreeDigests: treeDigests, ContextSessionIDsV8: sessions,
++		ExporterPolicy: intent, ExpectedImage: localcontext.ImageDescriptor{
++			MediaType: "application/vnd.oci.image.manifest.v1+json",
++			Digest:    "sha256:" + strings.Repeat("b", 64), Size: 100,
++		}, ExpiresAt: time.Now().Add(30 * time.Minute),
++	}
++	manager, err := localcontext.NewManager(&v51DEVScope{auth: auth}, true)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, scope, err := manager.BeginSolve(context.Background(), localcontext.Binding{
++		JobID: "job-v51-dev", Role: "runtime", Nonce: manifest.Nonce,
++		ApprovalID: "dev-v51-test", ApprovalEnvelope: base64.StdEncoding.EncodeToString([]byte("DEV nonauthorizing fixture")),
++		Exporter: intent,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	// Start a real distinct-UID sender, with the actual Go test executable
++	// copied into a root-owned executable path and no root keys in the child.
++	self, err := os.Executable()
++	if err != nil {
++		t.Fatal(err)
++	}
++	input, err := os.Open(self)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer input.Close()
++	helper := filepath.Join(base, "v51-child")
++	output, err := os.OpenFile(helper, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0555)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := io.Copy(output, input); err != nil {
++		t.Fatal(err)
++	}
++	if err := output.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(helper, 0555); err != nil {
++		t.Fatal(err)
++	}
++	socket := filepath.Join(base, "v51.sock")
++	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	if err := v50ArmPasscredBeforeAccept(listener); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chown(socket, 0, int(uid)); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Chmod(socket, 0660); err != nil {
++		t.Fatal(err)
++	}
++	cmd := exec.Command(helper, "-test.run=^TestC1V51RealProtectedPublisherFeedsV3Manager$")
++	cmd.Env = append(os.Environ(), "VIRKI_V51_TEST_CHILD=sender", "VIRKI_V51_SOURCE="+source, "VIRKI_V51_SOCKET="+socket)
++	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uid, Gid: uid, Groups: []uint32{}}}
++	if err := cmd.Start(); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if cmd.ProcessState == nil {
++			_ = cmd.Process.Kill()
++			_ = cmd.Wait()
++		}
++	})
++	if err := listener.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
++		t.Fatal(err)
++	}
++	conn, err := listener.AcceptUnix()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	record := localcontext.Consumption{
++		Name: "source", WorkerID: manifest.WorkerID, SessionID: manifest.SessionID,
++		VertexDigest: "sha256:" + strings.Repeat("c", 64),
++		SnapshotID:   "snap-v51", VertexOutputIndex: 0,
++	}
++	dest := filepath.Join(protected, "candidate-v51")
++	// A forged V3 worker identity must be refused BEFORE V40 spends the
++	// one-use V15 test permit and before V36 publishes anything.
++	hostileRecord := record
++	hostileRecord.WorkerID = "untrusted-worker"
++	if err := PublishV51DevContextToV3(ctx, manager, ledger, conn, cmd.Process.Pid, uid, uid,
++		dest, manifest, permit, pub, 7, 8, hostileRecord); err == nil ||
++		!strings.Contains(err.Error(), "differs from frozen") {
++		t.Fatalf("V51 must refuse hostile worker before durable permit use: %v", err)
++	}
++	claims, err := os.ReadFile(filepath.Join(ledger, v40LogName))
++	if err != nil || len(claims) != 0 {
++		t.Fatalf("hostile V51 worker burned a V40 permit: len=%d err=%v", len(claims), err)
++	}
++	if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
++		t.Fatalf("hostile V51 worker published without authority: %v", err)
++	}
++	if err := PublishV51DevContextToV3(ctx, manager, ledger, conn, cmd.Process.Pid, uid, uid,
++		dest, manifest, permit, pub, 7, 8, record); err != nil {
++		t.Fatalf("V50/V3 physical bridge refused valid source: %v", err)
++	}
++	if err := cmd.Wait(); err != nil {
++		t.Fatal(err)
++	}
++	measurement, got, err := v51MeasureProtectedPublication(dest, manifest)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if measurement.TreeDigest != expected.TreeDigest || string(got) != string(expectedStream) {
++		t.Fatal("V3 record did not derive from the exact root-owned published bytes")
++	}
++	if err := manager.ContextConsumed(ctx, record); err == nil || !strings.Contains(err.Error(), "duplicate local context") {
++		t.Fatalf("V3 Manager did not retain the real published context: %v", err)
++	}
++	if _, _, _, err := scope.CausalInputs(); err == nil {
++		t.Fatal("one protected published context cannot authorize the missing other three")
++	}
++	if err := claimV39DurableTestOwnerPermit(ledger, manifest, permit, pub, 7, 8); err == nil {
++		t.Fatal("V51 V40 one-use permit could be replayed")
++	}
++	if err := os.WriteFile(filepath.Join(dest, "app.js"), []byte("ROOT-FAULT-INJECTION"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err := v51MeasureProtectedPublication(dest, manifest); err == nil {
++		t.Fatal("V51 remeasurement accepted tampered root-owned publication")
++	}
++	// Published inodes remain inert with no source FD and no completed C4
++	// candidate: V51 deliberately implements only the first physical link.
++}
+diff --git a/solver/llbsolver/local_context_causality.go b/solver/llbsolver/local_context_causality.go
+index b379193..5a740c1 100644
+--- a/solver/llbsolver/local_context_causality.go
++++ b/solver/llbsolver/local_context_causality.go
+@@ -134,10 +134,29 @@ func localContextOutputFromExport(
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	var ociDAG *localcontext.OCIDAGProof
++	if scope.RequiresNativeOCIContent() {
++		provider, err := containerimage.LocalContextContentStore(exp)
++		if err != nil {
++			return nil, err
++		}
++		ociDAG, err = localContextOCIDAGProof(ctx, provider, descrefs[0].Descriptor())
++	} else {
++		// Preserve legacy DEV metadata; this schema never proves OCI content.
++		ociDAG = &localcontext.OCIDAGProof{SchemaVersion: 1, Root: image, Nodes: []localcontext.OCIDAGNode{{MediaType: image.MediaType, Digest: image.Digest, Size: image.Size, Role: "root"}}}
++		if cfgDigest := response[exptypes.ExporterImageConfigDigestKey]; cfgDigest != "" {
++			ociDAG.Nodes = append(ociDAG.Nodes, localcontext.OCIDAGNode{MediaType: "application/vnd.oci.image.config.v1+json", Digest: cfgDigest, Role: "config"})
++		}
++		ociDAG.ProofDigest, err = localcontext.OCIDAGProofDigest(*ociDAG)
++	}
++	if err != nil {
++		return nil, err
++	}
+ 	return &localcontext.Output{
+ 		WorkerID:  workerID,
+ 		Image:     image,
+ 		Causality: proof,
++		OCIDAG:    ociDAG,
+ 	}, nil
+ }
+ 
+diff --git a/solver/llbsolver/local_context_oci_dag.go b/solver/llbsolver/local_context_oci_dag.go
+new file mode 100644
+index 0000000..25beff5
+--- /dev/null
++++ b/solver/llbsolver/local_context_oci_dag.go
+@@ -0,0 +1,150 @@
++package llbsolver
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++
++	"github.com/containerd/containerd/v2/core/content"
++	"github.com/moby/buildkit/util/localcontext"
++	"github.com/opencontainers/go-digest"
++	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
++)
++
++// Only ordinary OCI/Docker image descriptor graphs are admitted by V3 DEV.
++// Unknown artifact/subject graphs must not be silently treated as leaves.
++func localContextOCIKind(media string) string {
++	switch media {
++	case ocispec.MediaTypeImageManifest, "application/vnd.docker.distribution.manifest.v2+json":
++		return "manifest"
++	case ocispec.MediaTypeImageIndex, "application/vnd.docker.distribution.manifest.list.v2+json":
++		return "index"
++	case ocispec.MediaTypeImageConfig, "application/vnd.docker.container.image.v1+json":
++		return "config"
++	case "application/vnd.oci.image.layer.v1.tar", "application/vnd.oci.image.layer.v1.tar+gzip", "application/vnd.oci.image.layer.v1.tar+zstd",
++		"application/vnd.oci.image.layer.nondistributable.v1.tar", "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip", "application/vnd.oci.image.layer.nondistributable.v1.tar+zstd",
++		"application/vnd.docker.image.rootfs.diff.tar", "application/vnd.docker.image.rootfs.diff.tar.gzip", "application/vnd.docker.image.rootfs.diff.tar.zstd",
++		"application/vnd.docker.image.rootfs.foreign.diff.tar", "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip":
++		return "layer"
++	default:
++		return ""
++	}
++}
++
++func localContextOCIDAGProof(ctx context.Context, provider content.Provider, root ocispec.Descriptor) (*localcontext.OCIDAGProof, error) {
++	dag := &localcontext.OCIDAGProof{SchemaVersion: 2, Root: localcontext.ImageDescriptor{MediaType: root.MediaType, Digest: root.Digest.String(), Size: root.Size}}
++	seen := make(map[digest.Digest]localcontext.OCIDAGNode)
++	active := make(map[digest.Digest]bool)
++	edges := 0
++	var visit func(ocispec.Descriptor, int) error
++	visit = func(desc ocispec.Descriptor, depth int) error {
++		if depth > 0 {
++			edges++
++			if edges > localcontext.OCIDAGMaxEdges {
++				return fmt.Errorf("OCI DEV evidence exceeds edge budget")
++			}
++		}
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		kind := localContextOCIKind(desc.MediaType)
++		if depth > 64 || kind == "" || desc.Size <= 0 || desc.Digest.Validate() != nil || desc.Digest.Algorithm() != digest.SHA256 || active[desc.Digest] {
++			return fmt.Errorf("invalid or unsupported OCI descriptor %s", desc.Digest)
++		}
++		if previous, ok := seen[desc.Digest]; ok {
++			if previous.Size != desc.Size || previous.MediaType != desc.MediaType {
++				return fmt.Errorf("conflicting OCI descriptor %s", desc.Digest)
++			}
++			return nil
++		}
++		if len(dag.Nodes) >= localcontext.OCIDAGMaxNodes || desc.Size > int64(localcontext.OCIDAGArchiveMaxBytes-len(dag.BlobBytes)) ||
++			((kind == "manifest" || kind == "index") && (desc.Size == 0 || desc.Size > 4*1024*1024)) {
++			return fmt.Errorf("OCI DEV evidence exceeds bounded archive limits")
++		}
++		reader, err := provider.ReaderAt(ctx, desc)
++		if err != nil {
++			return err
++		}
++		if reader.Size() != desc.Size {
++			_ = reader.Close()
++			return fmt.Errorf("OCI stored size differs for %s", desc.Digest)
++		}
++		start := len(dag.BlobBytes)
++		dag.BlobBytes = append(dag.BlobBytes, make([]byte, int(desc.Size))...)
++		blob := dag.BlobBytes[start:]
++		_, err = io.ReadFull(io.NewSectionReader(reader, 0, desc.Size), blob)
++		closeErr := reader.Close()
++		if err != nil {
++			return err
++		}
++		if closeErr != nil {
++			return closeErr
++		}
++		if digest.FromBytes(blob) != desc.Digest {
++			return fmt.Errorf("OCI stored digest differs for %s", desc.Digest)
++		}
++		node := localcontext.OCIDAGNode{MediaType: desc.MediaType, Digest: desc.Digest.String(), Size: desc.Size}
++		if depth == 0 {
++			node.Role = "root"
++		}
++		dag.Nodes = append(dag.Nodes, node)
++		seen[desc.Digest] = node
++		active[desc.Digest] = true
++		defer delete(active, desc.Digest)
++		switch kind {
++		case "manifest":
++			var manifest ocispec.Manifest
++			if err := json.Unmarshal(blob, &manifest); err != nil {
++				return err
++			}
++			if manifest.SchemaVersion != 2 || (manifest.MediaType != "" && manifest.MediaType != desc.MediaType) || manifest.Subject != nil || manifest.ArtifactType != "" || manifest.Layers == nil || localContextOCIKind(manifest.Config.MediaType) != "config" {
++				return fmt.Errorf("unsupported OCI image manifest")
++			}
++			if len(manifest.Layers) > localcontext.OCIDAGMaxNodes {
++				return fmt.Errorf("OCI manifest has too many layers")
++			}
++			if err := visit(manifest.Config, depth+1); err != nil {
++				return err
++			}
++			for _, layer := range manifest.Layers {
++				if localContextOCIKind(layer.MediaType) != "layer" {
++					return fmt.Errorf("unsupported OCI image layer")
++				}
++				if err := visit(layer, depth+1); err != nil {
++					return err
++				}
++			}
++		case "index":
++			var index ocispec.Index
++			if err := json.Unmarshal(blob, &index); err != nil {
++				return err
++			}
++			if index.SchemaVersion != 2 || (index.MediaType != "" && index.MediaType != desc.MediaType) || index.Subject != nil || index.ArtifactType != "" || len(index.Manifests) == 0 {
++				return fmt.Errorf("unsupported OCI image index")
++			}
++			if len(index.Manifests) > localcontext.OCIDAGMaxNodes {
++				return fmt.Errorf("OCI index has too many manifests")
++			}
++			for _, child := range index.Manifests {
++				kind := localContextOCIKind(child.MediaType)
++				if kind != "index" && kind != "manifest" {
++					return fmt.Errorf("unsupported OCI index member")
++				}
++				if err := visit(child, depth+1); err != nil {
++					return err
++				}
++			}
++		}
++		return nil
++	}
++	if provider == nil || (localContextOCIKind(root.MediaType) != "index" && localContextOCIKind(root.MediaType) != "manifest") {
++		return nil, fmt.Errorf("missing OCI image root or content provider")
++	}
++	if err := visit(root, 0); err != nil {
++		return nil, err
++	}
++	var err error
++	dag.ProofDigest, err = localcontext.OCIDAGProofDigest(*dag)
++	return dag, err
++}
+diff --git a/solver/llbsolver/local_context_oci_dag_test.go b/solver/llbsolver/local_context_oci_dag_test.go
+new file mode 100644
+index 0000000..3bff3b5
+--- /dev/null
++++ b/solver/llbsolver/local_context_oci_dag_test.go
+@@ -0,0 +1,63 @@
++package llbsolver
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"testing"
++
++	"github.com/containerd/containerd/v2/core/content"
++	"github.com/containerd/containerd/v2/plugins/content/local"
++	"github.com/opencontainers/go-digest"
++	specs "github.com/opencontainers/image-spec/specs-go"
++	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
++)
++
++func TestLocalContextOCIDAGReadsStoredContent(t *testing.T) {
++	ctx := context.Background()
++	store, err := local.NewStore(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	var stored = map[digest.Digest][]byte{}
++	put := func(media string, raw []byte) ocispec.Descriptor {
++		d := ocispec.Descriptor{MediaType: media, Digest: digest.FromBytes(raw), Size: int64(len(raw))}
++		if err := content.WriteBlob(ctx, store, d.Digest.String(), bytes.NewReader(raw), d); err != nil {
++			t.Fatal(err)
++		}
++		stored[d.Digest] = raw
++		return d
++	}
++	encode := func(value any) []byte {
++		raw, err := json.Marshal(value)
++		if err != nil {
++			t.Fatal(err)
++		}
++		return raw
++	}
++	layer := put(ocispec.MediaTypeImageLayer, make([]byte, 1024))
++	config := put(ocispec.MediaTypeImageConfig, []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["`+layer.Digest.String()+`"]}}`))
++	manifest := put(ocispec.MediaTypeImageManifest, encode(ocispec.Manifest{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageManifest, Config: config, Layers: []ocispec.Descriptor{layer}}))
++	index := put(ocispec.MediaTypeImageIndex, encode(ocispec.Index{Versioned: specs.Versioned{SchemaVersion: 2}, MediaType: ocispec.MediaTypeImageIndex, Manifests: []ocispec.Descriptor{manifest, manifest}}))
++	proof, err := localContextOCIDAGProof(ctx, store, index)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(proof.Nodes) != 4 || proof.Root.Digest != index.Digest.String() || proof.SchemaVersion != 2 || proof.ProofDigest == "" {
++		t.Fatal("incomplete OCI content graph")
++	}
++	var expected []byte
++	for _, node := range proof.Nodes {
++		expected = append(expected, stored[digest.Digest(node.Digest)]...)
++	}
++	if !bytes.Equal(expected, proof.BlobBytes) {
++		t.Fatal("OCI evidence does not contain the exact stored content")
++	}
++	// Normal content-store failure must not produce partial proof.
++	if err := store.Delete(ctx, layer.Digest); err != nil {
++		t.Fatal(err)
++	}
++	if incomplete, err := localContextOCIDAGProof(ctx, store, index); err == nil || incomplete != nil {
++		t.Fatal("missing stored content did not fail closed")
++	}
++}
+diff --git a/source/local/consumption.go b/source/local/consumption.go
+index 629aced..ba9110f 100644
+--- a/source/local/consumption.go
++++ b/source/local/consumption.go
+@@ -33,22 +33,38 @@ func verifyCommittedLocalContext(transferred, committed filesync.LocalContextObs
+ }
+ 
+ func measureCommittedLocalContext(ctx context.Context, ref cache.ImmutableRef, sessionID, name string) (filesync.LocalContextObservation, error) {
++	obs, _, err := measureCommittedLocalContextImpl(ctx, ref, sessionID, name, false)
++	return obs, err
++}
++
++func measureCommittedLocalContextStream(ctx context.Context, ref cache.ImmutableRef, sessionID, name string) (filesync.LocalContextObservation, []byte, error) {
++	return measureCommittedLocalContextImpl(ctx, ref, sessionID, name, true)
++}
++
++func measureCommittedLocalContextImpl(ctx context.Context, ref cache.ImmutableRef, sessionID, name string, captureStream bool) (filesync.LocalContextObservation, []byte, error) {
+ 	mount, err := ref.Mount(ctx, true, session.NewGroup(sessionID))
+ 	if err != nil {
+-		return filesync.LocalContextObservation{}, err
++		return filesync.LocalContextObservation{}, nil, err
+ 	}
+ 	lm := snapshot.LocalMounter(mount)
+ 	root, err := lm.Mount()
+ 	if err != nil {
+-		return filesync.LocalContextObservation{}, err
++		return filesync.LocalContextObservation{}, nil, err
++	}
++	var observation filesync.LocalContextObservation
++	var streamBytes []byte
++	var observeErr error
++	if captureStream {
++		observation, streamBytes, observeErr = filesync.BuildLocalContextStream(root, name, filesync.MaxLocalContextStreamBytes)
++	} else {
++		observation, observeErr = filesync.ObserveLocalContext(root, name)
+ 	}
+-	observation, observeErr := filesync.ObserveLocalContext(root, name)
+ 	unmountErr := lm.Unmount()
+ 	if observeErr != nil {
+-		return filesync.LocalContextObservation{}, observeErr
++		return filesync.LocalContextObservation{}, nil, observeErr
+ 	}
+ 	if unmountErr != nil {
+-		return filesync.LocalContextObservation{}, unmountErr
++		return filesync.LocalContextObservation{}, nil, unmountErr
+ 	}
+-	return observation, nil
++	return observation, streamBytes, nil
+ }
+diff --git a/source/local/source.go b/source/local/source.go
+index 703096d..870e2d5 100644
+--- a/source/local/source.go
++++ b/source/local/source.go
+@@ -544,14 +544,14 @@ func (ls *localSourceHandler) snapshot(ctx context.Context, sessionID string, ca
+ 		}
+ 	}
+ 
+-		// V14 fail-closed gate BEFORE any root one-use transfer claim and
+-		// immediately before FileSync. No canonical local context in this
+-		// owner-scoped V13 generation may send mutable client filesystem bytes.
+-		if err := localcontext.RequirePhysicalMainTransferV14(ctx, ownerName); err != nil {
+-			return nil, err
+-		}
+-		if ownerName == localcontext.RootDockerignoreRoleV10 {
+-			// Consume the one-use claim IMMEDIATELY BEFORE the first FileSync call.
++	// V14 fail-closed gate BEFORE any root one-use transfer claim and
++	// immediately before FileSync. No canonical local context in this
++	// owner-scoped V13 generation may send mutable client filesystem bytes.
++	if err := localcontext.RequirePhysicalMainTransferV14(ctx, ownerName); err != nil {
++		return nil, err
++	}
++	if ownerName == localcontext.RootDockerignoreRoleV10 {
++		// Consume the one-use claim IMMEDIATELY BEFORE the first FileSync call.
+ 		// Cache search, mounting and metadata setup must be safely retryable
+ 		// if they fail without having sent any bytes. After this boundary,
+ 		// ambiguous transfer failure remains terminal for the solve generation.
+@@ -596,7 +596,14 @@ func (ls *localSourceHandler) snapshot(ctx context.Context, sessionID string, ca
+ 			_ = snap.Release(context.WithoutCancel(ctx))
+ 			return nil, errors.New("worker local-source observation is missing after snapshot commit")
+ 		}
+-		committed, err := measureCommittedLocalContext(ctx, snap, sessionID, ls.src.Name)
++		var committed filesync.LocalContextObservation
++		var streamBytes []byte
++		var err error
++		if ownerName != localcontext.RootDockerignoreRoleV10 && localcontext.OwnerScopedSolveActiveV7(ctx) {
++			committed, streamBytes, err = measureCommittedLocalContextStream(ctx, snap, sessionID, ls.src.Name)
++		} else {
++			committed, err = measureCommittedLocalContext(ctx, snap, sessionID, ls.src.Name)
++		}
+ 		if err != nil {
+ 			_ = snap.Release(context.WithoutCancel(ctx))
+ 			return nil, errors.Wrap(err, "failed to measure immutable local-source snapshot")
+@@ -614,6 +621,9 @@ func (ls *localSourceHandler) snapshot(ctx context.Context, sessionID string, ca
+ 			SnapshotID:        snap.ID(),
+ 			TreeDigestSchema:  committed.TreeDigestSchema,
+ 			TreeDigest:        committed.TreeDigest,
++			StreamDigest:      committed.StreamDigest,
++			StreamLength:      committed.StreamLength,
++			StreamBytes:       streamBytes,
+ 			RegularFileBytes:  committed.RegularFileBytes,
+ 			EntryCount:        committed.EntryCount,
+ 		}
+diff --git a/util/localcontext/observer.go b/util/localcontext/observer.go
+index 38cef09..604dc2c 100644
+--- a/util/localcontext/observer.go
++++ b/util/localcontext/observer.go
+@@ -181,15 +181,42 @@ type Consumption struct {
+ 	SnapshotID        string `json:"snapshotId"`
+ 	TreeDigestSchema  string `json:"treeDigestSchema"`
+ 	TreeDigest        string `json:"treeDigest"`
++	StreamDigest      string `json:"streamDigest,omitempty"`
++	StreamLength      int64  `json:"streamLength,omitempty"`
++	StreamBytes       []byte `json:"-"`
+ 	RegularFileBytes  int64  `json:"regularFileBytes"`
+ 	EntryCount        int    `json:"entryCount"`
+ }
+ 
++// OCIDAGNode records a typed OCI descriptor node in the exported image graph.
++type OCIDAGNode struct {
++	MediaType string `json:"mediaType"`
++	Digest    string `json:"digest"`
++	Size      int64  `json:"size"`
++	Role      string `json:"role,omitempty"`
++}
++
++// OCIDAGProof binds the exported OCI root descriptor and resolved child nodes.
++type OCIDAGProof struct {
++	SchemaVersion int             `json:"schemaVersion"`
++	Root          ImageDescriptor `json:"root"`
++	Nodes         []OCIDAGNode    `json:"nodes,omitempty"`
++	ProofDigest   string          `json:"proofDigest"`
++	// Concatenated unique content blobs in Nodes order, transferred separately
++	// to the native verifier. Never serialize image bytes into JSON or logs.
++	BlobBytes []byte `json:"-"`
++}
++
++const OCIDAGArchiveMaxBytes = 64 * 1024 * 1024
++const OCIDAGMaxNodes = 4096
++const OCIDAGMaxEdges = 16384
++
+ // Output identifies the actual typed image descriptor and solver causality.
+ type Output struct {
+ 	WorkerID  string          `json:"workerId"`
+ 	Image     ImageDescriptor `json:"image"`
+ 	Causality CausalityProof  `json:"causality"`
++	OCIDAG    *OCIDAGProof    `json:"ociDag,omitempty"`
+ }
+ 
+ // Completion binds the exact context observations to one owner authorization
+@@ -346,6 +373,16 @@ type SolveScope struct {
+ 	abortRequested                          bool
+ }
+ 
++// RequiresNativeOCIContent is a local service-selection property, not a
++// caller-controlled request attribute. V2/legacy DEV evidence stays unchanged.
++func (s *SolveScope) RequiresNativeOCIContent() bool {
++	if s == nil || s.manager == nil {
++		return false
++	}
++	_, ok := s.manager.service.(*VROAV3Service)
++	return ok
++}
++
+ // NewManager refuses required operation without an owner-controlled service.
+ func NewManager(service Service, required bool) (*Manager, error) {
+ 	if required && service == nil {
+@@ -1032,3 +1069,29 @@ func isRequiredContext(name string) bool {
+ 	}
+ 	return false
+ }
++
++// OCIDAGProofDigest computes the canonical SHA-256 digest of an OCIDAGProof.
++func OCIDAGProofDigest(dag OCIDAGProof) (string, error) {
++	if dag.SchemaVersion != 1 && dag.SchemaVersion != 2 {
++		return "", errors.New("unsupported OCI DAG proof schema version")
++	}
++	if err := validateImageDescriptor(dag.Root); err != nil {
++		return "", err
++	}
++	if len(dag.Nodes) == 0 || len(dag.Nodes) > OCIDAGMaxNodes {
++		return "", errors.New("OCI DAG proof requires at least one node")
++	}
++	dag.ProofDigest = ""
++	raw, err := json.Marshal(dag)
++	if err != nil {
++		return "", err
++	}
++	h := sha256.New()
++	if dag.SchemaVersion == 2 {
++		_, _ = h.Write([]byte("virki-c1-oci-dag-v2\x00"))
++	} else {
++		_, _ = h.Write([]byte("virki-c1-oci-dag-v1\x00"))
++	}
++	_, _ = h.Write(raw)
++	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
++}
+diff --git a/util/localcontext/service_linux.go b/util/localcontext/service_linux.go
+index c3f2589..6e8a0d2 100644
+--- a/util/localcontext/service_linux.go
++++ b/util/localcontext/service_linux.go
+@@ -23,8 +23,9 @@ const maxServiceMessageBytes = 64 * 1024
+ // UnixSocketService sends observations to a separately controlled local owner
+ // service. The socket is never used to expose a Docker API.
+ type UnixSocketService struct {
+-	path     string
+-	ownerUID uint32
++	path                  string
++	ownerUID              uint32
++	allowGroupSocketWrite bool
+ }
+ 
+ // NewUnixSocketService requires an absolute, non-symlink socket path owned by
+@@ -267,9 +268,15 @@ func (s *UnixSocketService) verifySocketPath() error {
+ 		}
+ 		isFinal := index == len(parts)-1
+ 		if isFinal {
+-			if info.Mode()&os.ModeSocket == 0 || stat.Uid != s.ownerUID || info.Mode().Perm()&0022 != 0 {
++			perm := info.Mode().Perm()
++			if info.Mode()&os.ModeSocket == 0 || stat.Uid != s.ownerUID || perm&0002 != 0 {
+ 				return errors.New("owner local-context observer socket has an unexpected type, owner, or mode")
+ 			}
++			if perm&0020 != 0 {
++				if !s.allowGroupSocketWrite || !callerInGroup(stat.Gid) {
++					return errors.New("owner local-context observer socket group-write mode is not permitted")
++				}
++			}
+ 			continue
+ 		}
+ 		if !info.IsDir() {
+@@ -281,3 +288,19 @@ func (s *UnixSocketService) verifySocketPath() error {
+ 	}
+ 	return nil
+ }
++
++func callerInGroup(gid uint32) bool {
++	if gid == uint32(os.Getegid()) {
++		return true
++	}
++	groups, err := os.Getgroups()
++	if err != nil {
++		return false
++	}
++	for _, g := range groups {
++		if g >= 0 && uint32(g) == gid {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/util/localcontext/service_other.go b/util/localcontext/service_other.go
+index 45bf7be..202d36e 100644
+--- a/util/localcontext/service_other.go
++++ b/util/localcontext/service_other.go
+@@ -25,3 +25,34 @@ func (*UnixSocketService) Complete(context.Context, Completion) error {
+ func (*UnixSocketService) Abort(context.Context, string, string) error {
+ 	return errors.New("owner local-context Unix socket service is supported only on Linux")
+ }
++
++// VROAV3Options configures the BuildKit-to-C4 VROA_V3 native client.
++type VROAV3Options struct {
++	Epoch             uint64
++	ApprovalPublicKey []byte
++	ApprovalKeyID     string
++	ApprovalPinSHA256 string
++	ReceiptPublicKey  []byte
++	ReceiptKeyID      string
++	ExporterPolicy    ExporterIntent
++	ExpectedImage     ImageDescriptor
++}
++
++// VROAV3Service is unavailable on non-Linux BuildKit daemons.
++type VROAV3Service struct{}
++
++func NewVROAV3Service(_ string, _ uint32, _ VROAV3Options) (*VROAV3Service, error) {
++	return nil, errors.New("owner local-context VROA_V3 service is supported only on Linux")
++}
++
++func (*VROAV3Service) Begin(context.Context, Binding) (Authorization, error) {
++	return Authorization{}, errors.New("owner local-context VROA_V3 service is supported only on Linux")
++}
++
++func (*VROAV3Service) Complete(context.Context, Completion) error {
++	return errors.New("owner local-context VROA_V3 service is supported only on Linux")
++}
++
++func (*VROAV3Service) Abort(context.Context, string, string) error {
++	return errors.New("owner local-context VROA_V3 service is supported only on Linux")
++}
+diff --git a/util/localcontext/service_vroa_v3_linux.go b/util/localcontext/service_vroa_v3_linux.go
+new file mode 100644
+index 0000000..06ecb92
+--- /dev/null
++++ b/util/localcontext/service_vroa_v3_linux.go
+@@ -0,0 +1,886 @@
++//go:build linux
++
++package localcontext
++
++import (
++	"bytes"
++	"context"
++	"crypto/ed25519"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"math"
++	"net"
++	"strings"
++	"sync"
++	"syscall"
++	"time"
++
++	"golang.org/x/sys/unix"
++)
++
++const (
++	vroaProtocolVersionV3 = uint32(3)
++	vroaMagicV3           = "VROA_V3\x00"
++	vroaApprovalMagicV3   = "VROA_AP3"
++	vroaEvidenceMagicV3   = "VROA_EV3"
++	vroaApprovalDomainV3  = "VIRKI_OFFLINE_OWNER_APPROVAL_V3\x00"
++	vroaReceiptDomainV3   = "VIRKI_C4_CANDIDATE_RECEIPT_V3\x00"
++	vroaMaxEvidenceBytes  = 4 * 1024 * 1024
++
++	vroaCmdV3Begin           = uint32(0x11)
++	vroaCmdV3VerifyCandidate = uint32(0x12)
++	vroaCmdV3Abort           = uint32(0x13)
++
++	vroaStatusOK                 = uint32(0)
++	vroaStatusErrStaleEpoch      = uint32(16)
++	vroaStatusErrScopeAborted    = uint32(21)
++	vroaStatusErrSigningDisabled = uint32(22)
++)
++
++// VROAV3SigningDisabledError indicates that C4 verified the approval, sealed
++// context streams, and evidence bundle, then denied receipt/release signing.
++type VROAV3SigningDisabledError struct {
++	Status uint32
++	Epoch  uint64
++}
++
++func (e *VROAV3SigningDisabledError) Error() string {
++	return fmt.Sprintf("C4 VROA_V3 verified candidate bytes but signing is disabled (status=%d, epoch=%d)", e.Status, e.Epoch)
++}
++
++// VROAV3Options configures the BuildKit-to-C4 VROA_V3 native client.
++type VROAV3Options struct {
++	Epoch             uint64
++	ApprovalPublicKey ed25519.PublicKey
++	ApprovalKeyID     string
++	ApprovalPinSHA256 string
++	ReceiptPublicKey  ed25519.PublicKey
++	ReceiptKeyID      string
++	ExporterPolicy    ExporterIntent
++	ExpectedImage     ImageDescriptor
++}
++
++type vroaV3ContextClaim struct {
++	Name         [32]byte
++	SessionID    [65]byte
++	Identity     [65]byte
++	TreeDigest   [73]byte
++	StreamDigest [73]byte
++	StreamLength uint64
++}
++
++type vroaV3ApprovalEnvelope struct {
++	Magic                  [8]byte
++	Version                uint32
++	Epoch                  uint64
++	ExpiresUnix            uint64
++	KeyID                  [65]byte
++	PublicKeyPinSHA256     [65]byte
++	ApprovalID             [65]byte
++	ApprovalSerial         [65]byte
++	JobID                  [65]byte
++	Role                   [16]byte
++	Nonce                  [33]byte
++	SourceCommit           [41]byte
++	BuildPlanSHA256        [65]byte
++	ExecutablePolicySHA256 [65]byte
++	ExporterIntentSHA256   [65]byte
++	OutputImageID          [73]byte
++	FileSyncManifestSHA256 [65]byte
++	IgnorePolicySHA256     [65]byte
++	WorkerID               [65]byte
++	WorkerUID              uint32
++	WorkerGID              uint32
++	DockerfileSHA256       [65]byte
++	IgnorePath             [257]byte
++	IgnoreSHA256           [65]byte
++	IgnorePresent          uint32
++	IgnoreSource           [32]byte
++	ContextCount           uint32
++	Contexts               [4]vroaV3ContextClaim
++	Signature              [64]byte
++}
++
++type vroaV3EvidenceHeader struct {
++	Magic                     [8]byte
++	Version                   uint32
++	ApprovalEnvelopeSHA256    [65]byte
++	JobID                     [65]byte
++	Role                      [16]byte
++	Nonce                     [33]byte
++	WorkerID                  [65]byte
++	OutputImageID             [73]byte
++	ExporterIntentSHA256      [65]byte
++	FileSyncManifestSHA256    [65]byte
++	CausalityProofSHA256      [65]byte
++	OCIDAGSHA256              [65]byte
++	FrontendProofSHA256       [65]byte
++	ContextTreeDigests        [4][73]byte
++	ContextStreamDigests      [4][73]byte
++	ContextStreamLengths      [4]uint64
++	DeployAuthorized          uint32
++	WorkerReceiptPairAdmitted uint32
++	EvidencePayloadBytes      uint32
++	EvidencePayloadSHA256     [65]byte
++}
++
++type vroaV3RequestFrame struct {
++	Magic                  [8]byte
++	Version                uint32
++	Cmd                    uint32
++	Epoch                  uint64
++	ScopeToken             [65]byte
++	SessionID              [65]byte
++	JobID                  [65]byte
++	Role                   [16]byte
++	Nonce                  [33]byte
++	SourceCommit           [41]byte
++	BuildPlanSHA256        [65]byte
++	ExecutablePolicySHA256 [65]byte
++	OutputImageID          [73]byte
++	ExpectedTreeDigests    [4][73]byte
++	ExpectedStreamDigests  [4][73]byte
++	ExpectedStreamLengths  [4]uint64
++	ArchiveSHA256          [65]byte
++	ArchiveBytes           uint64
++	TranscriptSHA256       [65]byte
++	ApprovalKeyID          [65]byte
++	ApprovalID             [65]byte
++	ApprovalSerial         [65]byte
++	ApprovalEnvelopeSHA256 [65]byte
++}
++
++type vroaV3ResponseFrame struct {
++	Magic              [8]byte
++	Version            uint32
++	Status             uint32
++	Epoch              uint64
++	SequenceNumber     uint64
++	ScopeToken         [65]byte
++	OwnerKeyID         [65]byte
++	SignatureBase64    [128]byte
++	CanonicalAckSHA256 [65]byte
++	AckJSONLen         uint32
++	AckJSON            [4096]byte
++}
++
++// VROAV3CandidateReceipt is the DEV-only signed receipt returned by C4.
++type VROAV3CandidateReceipt struct {
++	Version                   uint32   `json:"version"`
++	Status                    string   `json:"status"`
++	OwnerKeyID                string   `json:"ownerKeyId,omitempty"`
++	ApprovalKeyID             string   `json:"approvalKeyId,omitempty"`
++	ApprovalID                string   `json:"approvalId,omitempty"`
++	ApprovalSerial            string   `json:"approvalSerial,omitempty"`
++	ScopeToken                string   `json:"scopeToken,omitempty"`
++	ApprovalEnvelopeSHA256    string   `json:"approvalEnvelopeSha256"`
++	EvidenceSHA256            string   `json:"evidenceSha256"`
++	JobID                     string   `json:"jobId"`
++	Role                      string   `json:"role"`
++	Nonce                     string   `json:"nonce"`
++	SourceCommit              string   `json:"sourceCommit,omitempty"`
++	BuildPlanSHA256           string   `json:"buildPlanSha256,omitempty"`
++	ExecutablePolicySHA256    string   `json:"executablePolicySha256,omitempty"`
++	ExporterIntentSHA256      string   `json:"exporterIntentSha256,omitempty"`
++	FileSyncManifestSHA256    string   `json:"fileSyncManifestSha256,omitempty"`
++	WorkerID                  string   `json:"workerId"`
++	OutputImageID             string   `json:"outputImageId"`
++	ContextTreeDigests        []string `json:"contextTreeDigests,omitempty"`
++	ContextStreamDigests      []string `json:"contextStreamDigests,omitempty"`
++	ContextStreamLengths      []uint64 `json:"contextStreamLengths,omitempty"`
++	SequenceNumber            uint64   `json:"sequenceNumber"`
++	Epoch                     uint64   `json:"epoch"`
++	DeployAuthorized          bool     `json:"deployAuthorized"`
++	WorkerReceiptPairAdmitted bool     `json:"workerReceiptPairAdmitted"`
++	ReleaseSignature          bool     `json:"releaseSignature"`
++}
++
++type vroaV3ScopeState struct {
++	nonce    string
++	epoch    uint64
++	envelope vroaV3ApprovalEnvelope
++	rawEnv   []byte
++	envSHA   string
++}
++
++// VROAV3Service implements Service over the native C4 VROA_V3 SCM_RIGHTS wire protocol.
++type VROAV3Service struct {
++	socketChecker   *UnixSocketService
++	socketPath      string
++	opt             VROAV3Options
++	devAllowSameUID bool
++
++	mu          sync.Mutex
++	scopes      map[string]vroaV3ScopeState
++	lastReceipt *VROAV3CandidateReceipt
++}
++
++// NewVROAV3Service creates a VROA_V3 native C4 client bound to socketPath and ownerUID.
++func NewVROAV3Service(socketPath string, ownerUID uint32, opt VROAV3Options) (*VROAV3Service, error) {
++	checker := &UnixSocketService{
++		path:                  socketPath,
++		ownerUID:              ownerUID,
++		allowGroupSocketWrite: true,
++	}
++	if err := checker.verifySocketPath(); err != nil {
++		return nil, err
++	}
++	if opt.Epoch == 0 {
++		return nil, errors.New("VROA_V3 requires a positive active epoch")
++	}
++	if len(opt.ApprovalPublicKey) != ed25519.PublicKeySize {
++		return nil, errors.New("VROA_V3 requires a 32-byte Ed25519 approval public key")
++	}
++	if opt.ApprovalKeyID == "" || opt.ApprovalPinSHA256 == "" {
++		return nil, errors.New("VROA_V3 requires approvalKeyID and approvalPinSHA256")
++	}
++	if err := validateImageDescriptor(opt.ExpectedImage); err != nil {
++		return nil, fmt.Errorf("VROA_V3 requires a complete expected image descriptor: %w", err)
++	}
++	if len(opt.ReceiptPublicKey) != 0 {
++		if len(opt.ReceiptPublicKey) != ed25519.PublicKeySize {
++			return nil, errors.New("VROA_V3 receipt public key must be 32 bytes when set")
++		}
++		if bytes.Equal(opt.ReceiptPublicKey, opt.ApprovalPublicKey) ||
++			opt.ReceiptKeyID == opt.ApprovalKeyID {
++			return nil, errors.New("VROA_V3 receipt key and approval key must be distinct")
++		}
++	}
++	return &VROAV3Service{
++		socketChecker: checker,
++		socketPath:    socketPath,
++		opt:           opt,
++		scopes:        make(map[string]vroaV3ScopeState),
++	}, nil
++}
++
++// LastReceipt returns a copy of the most recently verified DEV receipt, if any.
++func (s *VROAV3Service) LastReceipt() (VROAV3CandidateReceipt, bool) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.lastReceipt == nil {
++		return VROAV3CandidateReceipt{}, false
++	}
++	return *s.lastReceipt, true
++}
++
++func (s *VROAV3Service) Begin(ctx context.Context, binding Binding) (Authorization, error) {
++	rawEnv, err := base64.StdEncoding.DecodeString(binding.ApprovalEnvelope)
++	if err != nil {
++		return Authorization{}, fmt.Errorf("decode VROA_V3 approval envelope: %w", err)
++	}
++	env, err := s.decodeAndVerifyApproval(rawEnv, binding)
++	if err != nil {
++		return Authorization{}, err
++	}
++	if err := validateImageDescriptor(s.opt.ExpectedImage); err != nil {
++		return Authorization{}, fmt.Errorf("VROA_V3 requires a complete expected image descriptor: %w", err)
++	}
++	if s.opt.ExpectedImage.Digest != vroaCString(env.OutputImageID[:]) {
++		return Authorization{}, errors.New("VROA_V3 expected image digest does not match signed approval")
++	}
++	envSum := sha256.Sum256(rawEnv)
++	envSHA := hex.EncodeToString(envSum[:])
++
++	approvalFD, err := createSealedMemfdV3("virki-v3-approval", rawEnv)
++	if err != nil {
++		return Authorization{}, err
++	}
++	defer func() { _ = syscall.Close(approvalFD) }()
++
++	var req vroaV3RequestFrame
++	copy(req.Magic[:], vroaMagicV3)
++	req.Version = vroaProtocolVersionV3
++	req.Cmd = vroaCmdV3Begin
++	req.Epoch = s.opt.Epoch
++	req.SessionID = env.WorkerID
++	req.JobID = env.JobID
++	req.Role = env.Role
++	req.Nonce = env.Nonce
++	req.SourceCommit = env.SourceCommit
++	req.BuildPlanSHA256 = env.BuildPlanSHA256
++	req.ExecutablePolicySHA256 = env.ExecutablePolicySHA256
++	req.OutputImageID = env.OutputImageID
++	req.ApprovalKeyID = env.KeyID
++	req.ApprovalID = env.ApprovalID
++	req.ApprovalSerial = env.ApprovalSerial
++	req.ArchiveSHA256 = env.FileSyncManifestSHA256
++	if err := vroaSetFixedString(req.ApprovalEnvelopeSHA256[:], envSHA); err != nil {
++		return Authorization{}, err
++	}
++	var totalBytes uint64
++	for i := range 4 {
++		req.ExpectedTreeDigests[i] = env.Contexts[i].TreeDigest
++		req.ExpectedStreamDigests[i] = env.Contexts[i].StreamDigest
++		req.ExpectedStreamLengths[i] = env.Contexts[i].StreamLength
++		if env.Contexts[i].StreamLength > math.MaxUint64-totalBytes {
++			return Authorization{}, errors.New("VROA_V3 archive byte count overflow")
++		}
++		totalBytes += env.Contexts[i].StreamLength
++	}
++	req.ArchiveBytes = totalBytes
++
++	resp, err := s.sendV3Request(ctx, req, []int{approvalFD})
++	if err != nil {
++		return Authorization{}, err
++	}
++	if resp.Status != vroaStatusOK {
++		return Authorization{}, fmt.Errorf("C4 V3_BEGIN refused request with status %d", resp.Status)
++	}
++	scopeToken := vroaCString(resp.ScopeToken[:])
++	if len(scopeToken) != 64 {
++		return Authorization{}, errors.New("C4 V3_BEGIN returned invalid scope token")
++	}
++
++	s.mu.Lock()
++	s.scopes[scopeToken] = vroaV3ScopeState{
++		nonce:    vroaCString(env.Nonce[:]),
++		epoch:    resp.Epoch,
++		envelope: env,
++		rawEnv:   append([]byte(nil), rawEnv...),
++		envSHA:   envSHA,
++	}
++	s.mu.Unlock()
++
++	identities := make(map[string]string, 4)
++	treeDigests := make(map[string]string, 4)
++	sessionIDs := make(map[string]string, 4)
++	for i := range 4 {
++		name := vroaCString(env.Contexts[i].Name[:])
++		identities[name] = vroaCString(env.Contexts[i].Identity[:])
++		treeDigests[name] = vroaCString(env.Contexts[i].TreeDigest[:])
++		sessionIDs[name] = vroaCString(env.Contexts[i].SessionID[:])
++	}
++	exporterPolicy := s.opt.ExporterPolicy
++	if exporterPolicy.Type == "" {
++		exporterPolicy = binding.Exporter
++	}
++	return Authorization{
++		Token:                   scopeToken,
++		Generation:              vroaCString(env.Nonce[:]),
++		WorkerID:                vroaCString(env.WorkerID[:]),
++		ContextIdentities:       identities,
++		ContextTreeDigestSchema: LocalContextTreeDigestSchemaV2,
++		ContextTreeDigests:      treeDigests,
++		ContextSessionIDsV8:     sessionIDs,
++		ExporterPolicy:          exporterPolicy,
++		ExpectedImage:           s.opt.ExpectedImage,
++		ExpiresAt:               time.Unix(int64(env.ExpiresUnix), 0).UTC(),
++	}, nil
++}
++
++const LocalContextTreeDigestSchemaV2 = "buildkit-worker-local-context-v2"
++
++func (s *VROAV3Service) Complete(ctx context.Context, completion Completion) error {
++	s.mu.Lock()
++	scopeState, ok := s.scopes[completion.Authorization.Token]
++	s.mu.Unlock()
++	if !ok {
++		return errors.New("C4 VROA_V3 scope token not found in active service state")
++	}
++
++	byName := make(map[string]Consumption, len(completion.Contexts))
++	for _, item := range completion.Contexts {
++		byName[item.Name] = item
++	}
++
++	var fds [7]int
++	for i := range fds {
++		fds[i] = -1
++	}
++	defer func() {
++		for _, fd := range fds {
++			if fd >= 0 {
++				_ = syscall.Close(fd)
++			}
++		}
++	}()
++
++	var header vroaV3EvidenceHeader
++	copy(header.Magic[:], vroaEvidenceMagicV3)
++	header.Version = vroaProtocolVersionV3
++	if err := vroaSetFixedString(header.ApprovalEnvelopeSHA256[:], scopeState.envSHA); err != nil {
++		return err
++	}
++	header.JobID = scopeState.envelope.JobID
++	header.Role = scopeState.envelope.Role
++	header.Nonce = scopeState.envelope.Nonce
++	header.WorkerID = scopeState.envelope.WorkerID
++	if err := vroaSetFixedString(header.OutputImageID[:], completion.Output.Image.Digest); err != nil {
++		return err
++	}
++	header.ExporterIntentSHA256 = scopeState.envelope.ExporterIntentSHA256
++	header.FileSyncManifestSHA256 = scopeState.envelope.FileSyncManifestSHA256
++
++	causalityHex := strings.TrimPrefix(completion.Output.Causality.ProofDigest, "sha256:")
++	if err := vroaSetFixedString(header.CausalityProofSHA256[:], causalityHex); err != nil {
++		return err
++	}
++	dag := completion.Output.OCIDAG
++	if dag == nil || dag.SchemaVersion != 2 || len(dag.BlobBytes) == 0 || len(dag.BlobBytes) > OCIDAGArchiveMaxBytes || dag.Root != completion.Output.Image {
++		return errors.New("VROA_V3 requires bounded OCI content bytes and matching root")
++	}
++	expectedOCIDigest, err := OCIDAGProofDigest(*dag)
++	if err != nil || dag.ProofDigest != expectedOCIDigest {
++		return errors.New("VROA_V3 OCI DAG proof digest mismatch")
++	}
++	ociHex := strings.TrimPrefix(dag.ProofDigest, "sha256:")
++	if err := vroaSetFixedString(header.OCIDAGSHA256[:], ociHex); err != nil {
++		return err
++	}
++
++	for i, name := range requiredContexts {
++		rec, exists := byName[name]
++		if !exists {
++			return fmt.Errorf("missing required context %q for VROA_V3", name)
++		}
++		if len(rec.StreamBytes) == 0 || int64(len(rec.StreamBytes)) != rec.StreamLength {
++			return fmt.Errorf("context %q missing sealed stream bytes", name)
++		}
++		sum := sha256.Sum256(rec.StreamBytes)
++		expectedStreamDigest := "sha256:" + hex.EncodeToString(sum[:])
++		if rec.StreamDigest != expectedStreamDigest {
++			return fmt.Errorf("context %q stream digest mismatch", name)
++		}
++		if err := vroaSetFixedString(header.ContextTreeDigests[i][:], rec.TreeDigest); err != nil {
++			return err
++		}
++		if err := vroaSetFixedString(header.ContextStreamDigests[i][:], rec.StreamDigest); err != nil {
++			return err
++		}
++		header.ContextStreamLengths[i] = uint64(rec.StreamLength)
++		fd, err := createSealedMemfdV3("virki-v3-ctx-"+name, rec.StreamBytes)
++		if err != nil {
++			return err
++		}
++		fds[i] = fd
++	}
++
++	approvalFD, err := createSealedMemfdV3("virki-v3-approval", scopeState.rawEnv)
++	if err != nil {
++		return err
++	}
++	fds[4] = approvalFD
++
++	payloadJSON, err := json.Marshal(struct {
++		SchemaVersion int           `json:"schemaVersion"`
++		Binding       Binding       `json:"binding"`
++		Contexts      []Consumption `json:"contexts"`
++		Output        Output        `json:"output"`
++		Epoch         uint64        `json:"epoch"`
++	}{
++		SchemaVersion: completion.SchemaVersion,
++		Binding:       completion.Binding,
++		Contexts:      completion.Contexts,
++		Output:        completion.Output,
++		Epoch:         scopeState.epoch,
++	})
++	if err != nil {
++		return err
++	}
++	if len(payloadJSON) == 0 || len(payloadJSON) > vroaMaxEvidenceBytes-binary.Size(header) {
++		return errors.New("VROA_V3 evidence payload exceeds bounds")
++	}
++	payloadSum := sha256.Sum256(payloadJSON)
++	header.EvidencePayloadBytes = uint32(len(payloadJSON))
++	if err := vroaSetFixedString(header.EvidencePayloadSHA256[:], hex.EncodeToString(payloadSum[:])); err != nil {
++		return err
++	}
++
++	headerBytes, err := vroaEncodeBinary(header)
++	if err != nil {
++		return err
++	}
++	evidenceBytes := append(headerBytes, payloadJSON...)
++	evidenceFD, err := createSealedMemfdV3("virki-v3-evidence", evidenceBytes)
++	if err != nil {
++		return err
++	}
++	fds[5] = evidenceFD
++	ociFD, err := createSealedMemfdV3("virki-v3-oci-content", dag.BlobBytes)
++	if err != nil {
++		return err
++	}
++	fds[6] = ociFD
++
++	var totalBytes uint64
++	for _, l := range header.ContextStreamLengths {
++		if l > math.MaxUint64-totalBytes {
++			return errors.New("VROA_V3 archive byte count overflow")
++		}
++		totalBytes += l
++	}
++	var req vroaV3RequestFrame
++	copy(req.Magic[:], vroaMagicV3)
++	req.Version = vroaProtocolVersionV3
++	req.Cmd = vroaCmdV3VerifyCandidate
++	req.Epoch = scopeState.epoch
++	if err := vroaSetFixedString(req.ScopeToken[:], completion.Authorization.Token); err != nil {
++		return err
++	}
++	req.SessionID = scopeState.envelope.WorkerID
++	req.JobID = scopeState.envelope.JobID
++	req.Role = scopeState.envelope.Role
++	req.Nonce = scopeState.envelope.Nonce
++	req.SourceCommit = scopeState.envelope.SourceCommit
++	req.BuildPlanSHA256 = scopeState.envelope.BuildPlanSHA256
++	req.ExecutablePolicySHA256 = scopeState.envelope.ExecutablePolicySHA256
++	req.OutputImageID = header.OutputImageID
++	req.ExpectedTreeDigests = header.ContextTreeDigests
++	req.ExpectedStreamDigests = header.ContextStreamDigests
++	req.ExpectedStreamLengths = header.ContextStreamLengths
++	req.ArchiveSHA256 = header.FileSyncManifestSHA256
++	req.ArchiveBytes = totalBytes
++	req.ApprovalKeyID = scopeState.envelope.KeyID
++	req.ApprovalID = scopeState.envelope.ApprovalID
++	req.ApprovalSerial = scopeState.envelope.ApprovalSerial
++	req.ApprovalEnvelopeSHA256 = header.ApprovalEnvelopeSHA256
++
++	transcriptSum := sha256.Sum256(evidenceBytes)
++	evidenceSHA := hex.EncodeToString(transcriptSum[:])
++	if err := vroaSetFixedString(req.TranscriptSHA256[:], evidenceSHA); err != nil {
++		return err
++	}
++
++	resp, err := s.sendV3Request(ctx, req, fds[:])
++	if err != nil {
++		return err
++	}
++	if resp.Status == vroaStatusErrSigningDisabled {
++		return &VROAV3SigningDisabledError{Status: resp.Status, Epoch: resp.Epoch}
++	}
++	if resp.Status != vroaStatusOK {
++		return fmt.Errorf("C4 V3_VERIFY_CANDIDATE refused request with status %d", resp.Status)
++	}
++	receipt, err := s.verifyReceipt(resp, req)
++	if err != nil {
++		return err
++	}
++	s.mu.Lock()
++	s.lastReceipt = &receipt
++	delete(s.scopes, completion.Authorization.Token)
++	s.mu.Unlock()
++	return nil
++}
++
++func (s *VROAV3Service) Abort(ctx context.Context, token, reason string) error {
++	s.mu.Lock()
++	scopeState, ok := s.scopes[token]
++	s.mu.Unlock()
++	if !ok {
++		return errors.New("C4 VROA_V3 abort scope token not found")
++	}
++	var req vroaV3RequestFrame
++	copy(req.Magic[:], vroaMagicV3)
++	req.Version = vroaProtocolVersionV3
++	req.Cmd = vroaCmdV3Abort
++	req.Epoch = scopeState.epoch
++	if err := vroaSetFixedString(req.ScopeToken[:], token); err != nil {
++		return err
++	}
++	if err := vroaSetFixedString(req.Nonce[:], scopeState.nonce); err != nil {
++		return err
++	}
++	resp, err := s.sendV3Request(ctx, req, nil)
++	if err != nil {
++		// Retain scopeState so Manager.retryPendingAborts can retry after transient failure.
++		return err
++	}
++	switch resp.Status {
++	case vroaStatusOK, vroaStatusErrScopeAborted, vroaStatusErrStaleEpoch:
++		// Scope is terminally closed on C4 (acknowledged abort, prior abort, or epoch advance).
++		s.mu.Lock()
++		delete(s.scopes, token)
++		s.mu.Unlock()
++		return nil
++	default:
++		return fmt.Errorf("C4 V3_ABORT refused request with status %d", resp.Status)
++	}
++}
++
++func (s *VROAV3Service) decodeAndVerifyApproval(raw []byte, binding Binding) (vroaV3ApprovalEnvelope, error) {
++	var env vroaV3ApprovalEnvelope
++	if len(raw) != binary.Size(env) {
++		return env, fmt.Errorf("VROA_AP3 envelope size mismatch: got %d, want %d", len(raw), binary.Size(env))
++	}
++	if err := binary.Read(bytes.NewReader(raw), binary.LittleEndian, &env); err != nil {
++		return env, err
++	}
++	if string(env.Magic[:]) != vroaApprovalMagicV3 || env.Version != vroaProtocolVersionV3 || env.ContextCount != 4 {
++		return env, errors.New("invalid VROA_AP3 magic, version or context count")
++	}
++	if env.ExpiresUnix == 0 || env.ExpiresUnix > math.MaxInt64 || time.Now().Unix() >= int64(env.ExpiresUnix) {
++		return env, errors.New("VROA_AP3 approval has expired or invalid expiry")
++	}
++	if len(s.opt.ApprovalPublicKey) != ed25519.PublicKeySize {
++		return env, errors.New("VROA_V3 approval public key is required")
++	}
++	if s.opt.ApprovalKeyID != "" && vroaCString(env.KeyID[:]) != s.opt.ApprovalKeyID {
++		return env, errors.New("VROA_AP3 keyId mismatch")
++	}
++	if s.opt.ApprovalPinSHA256 != "" && vroaCString(env.PublicKeyPinSHA256[:]) != s.opt.ApprovalPinSHA256 {
++		return env, errors.New("VROA_AP3 pin mismatch")
++	}
++	bodyLen := len(raw) - ed25519.SignatureSize
++	msg := append([]byte(vroaApprovalDomainV3), raw[:bodyLen]...)
++	if !ed25519.Verify(s.opt.ApprovalPublicKey, msg, env.Signature[:]) {
++		return env, errors.New("invalid VROA_AP3 Ed25519 signature")
++	}
++	if vroaCString(env.JobID[:]) != binding.JobID || vroaCString(env.Role[:]) != binding.Role ||
++		vroaCString(env.Nonce[:]) != binding.Nonce || vroaCString(env.ApprovalID[:]) != binding.ApprovalID {
++		return env, errors.New("VROA_AP3 envelope does not match solve binding")
++	}
++	if err := validateExporterIntent(binding.Exporter); err != nil {
++		return env, fmt.Errorf("VROA_AP3 solve binding has an invalid exporter intent: %w", err)
++	}
++	expectedExporterIntent := strings.TrimPrefix(binding.Exporter.AttributesDigest, "sha256:")
++	if vroaCString(env.ExporterIntentSHA256[:]) != expectedExporterIntent {
++		return env, errors.New("VROA_AP3 exporter intent does not match solve binding")
++	}
++	if s.opt.ExporterPolicy.Type != "" {
++		if err := validateExporterIntent(s.opt.ExporterPolicy); err != nil {
++			return env, fmt.Errorf("VROA_V3 configured exporter policy is invalid: %w", err)
++		}
++		if s.opt.ExporterPolicy != binding.Exporter {
++			return env, errors.New("VROA_V3 configured exporter policy does not match solve binding")
++		}
++	}
++	return env, nil
++}
++
++func (s *VROAV3Service) verifyReceipt(resp vroaV3ResponseFrame, expected vroaV3RequestFrame) (VROAV3CandidateReceipt, error) {
++	var receipt VROAV3CandidateReceipt
++	// A genuine C4 DEV receipt from another job remains correctly signed. Its
++	// signature alone must not authorize this BuildKit solve's local candidate.
++	if expected.Version != vroaProtocolVersionV3 || expected.Cmd != vroaCmdV3VerifyCandidate ||
++		expected.Epoch == 0 || vroaCString(expected.ScopeToken[:]) == "" ||
++		vroaCString(expected.ApprovalEnvelopeSHA256[:]) == "" ||
++		vroaCString(expected.TranscriptSHA256[:]) == "" {
++		return receipt, errors.New("incomplete expected VROA_V3 verification request")
++	}
++	if resp.AckJSONLen == 0 || resp.AckJSONLen > uint32(len(resp.AckJSON)) {
++		return receipt, errors.New("invalid C4 receipt ackJsonLen")
++	}
++	ackBytes := resp.AckJSON[:resp.AckJSONLen]
++	sum := sha256.Sum256(ackBytes)
++	if hex.EncodeToString(sum[:]) != vroaCString(resp.CanonicalAckSHA256[:]) {
++		return receipt, errors.New("C4 receipt canonicalAckSha256 mismatch")
++	}
++	if err := json.Unmarshal(ackBytes, &receipt); err != nil {
++		return receipt, err
++	}
++	if receipt.Version != vroaProtocolVersionV3 || receipt.Status != "CANDIDATE_VERIFIED" ||
++		receipt.ApprovalEnvelopeSHA256 != vroaCString(expected.ApprovalEnvelopeSHA256[:]) ||
++		receipt.EvidenceSHA256 != vroaCString(expected.TranscriptSHA256[:]) ||
++		receipt.DeployAuthorized || receipt.WorkerReceiptPairAdmitted || receipt.ReleaseSignature {
++		return receipt, errors.New("C4 receipt invariant violation")
++	}
++	if len(s.opt.ReceiptPublicKey) != ed25519.PublicKeySize {
++		return receipt, errors.New("VROA_V3 receipt public key is required to verify signed DEV receipt")
++	}
++	if s.opt.ReceiptKeyID != "" && vroaCString(resp.OwnerKeyID[:]) != s.opt.ReceiptKeyID {
++		return receipt, errors.New("C4 receipt ownerKeyId mismatch")
++	}
++	sig, err := base64.StdEncoding.DecodeString(vroaCString(resp.SignatureBase64[:]))
++	if err != nil || len(sig) != ed25519.SignatureSize {
++		return receipt, errors.New("invalid C4 receipt signature base64")
++	}
++	msg := append([]byte(vroaReceiptDomainV3), ackBytes...)
++	if !ed25519.Verify(s.opt.ReceiptPublicKey, msg, sig) {
++		return receipt, errors.New("invalid C4 receipt Ed25519 signature")
++	}
++	if resp.Epoch != expected.Epoch || receipt.Epoch != expected.Epoch ||
++		resp.SequenceNumber == 0 || receipt.SequenceNumber != resp.SequenceNumber {
++		return receipt, errors.New("signed C4 candidate receipt epoch/sequence differs from BuildKit request")
++	}
++	// Native C4 returns the verification scope in the SIGNED ack, not the
++	// response-frame ScopeToken field (that field is populated by V3_BEGIN).
++	// Refuse unexpected metadata instead of treating an unsigned response
++	// field as proof of scope ownership.
++	if vroaCString(resp.ScopeToken[:]) != "" {
++		return receipt, errors.New("signed C4 candidate receipt has unexpected unsigned response scope")
++	}
++	for _, field := range []struct{ name, signed, expected string }{
++		{"scope", receipt.ScopeToken, vroaCString(expected.ScopeToken[:])},
++		{"receipt signer", receipt.OwnerKeyID, vroaCString(resp.OwnerKeyID[:])},
++		{"approval key", receipt.ApprovalKeyID, vroaCString(expected.ApprovalKeyID[:])},
++		{"approval ID", receipt.ApprovalID, vroaCString(expected.ApprovalID[:])},
++		{"approval serial", receipt.ApprovalSerial, vroaCString(expected.ApprovalSerial[:])},
++		{"job", receipt.JobID, vroaCString(expected.JobID[:])},
++		{"role", receipt.Role, vroaCString(expected.Role[:])},
++		{"nonce", receipt.Nonce, vroaCString(expected.Nonce[:])},
++		{"worker", receipt.WorkerID, vroaCString(expected.SessionID[:])},
++		{"source commit", receipt.SourceCommit, vroaCString(expected.SourceCommit[:])},
++		{"build plan", receipt.BuildPlanSHA256, vroaCString(expected.BuildPlanSHA256[:])},
++		{"executable policy", receipt.ExecutablePolicySHA256, vroaCString(expected.ExecutablePolicySHA256[:])},
++		{"filesync manifest", receipt.FileSyncManifestSHA256, vroaCString(expected.ArchiveSHA256[:])},
++		{"output image", receipt.OutputImageID, vroaCString(expected.OutputImageID[:])},
++	} {
++		if field.signed != field.expected {
++			// Field names are safe diagnostics; never log signed contents or keys.
++			return receipt, fmt.Errorf("signed C4 candidate receipt %s differs from BuildKit VROA_V3 request", field.name)
++		}
++	}
++	if len(receipt.ContextTreeDigests) != len(expected.ExpectedTreeDigests) ||
++		len(receipt.ContextStreamDigests) != len(expected.ExpectedStreamDigests) ||
++		len(receipt.ContextStreamLengths) != len(expected.ExpectedStreamLengths) {
++		return receipt, errors.New("signed C4 candidate receipt context count mismatch")
++	}
++	for i := range expected.ExpectedTreeDigests {
++		if receipt.ContextTreeDigests[i] != vroaCString(expected.ExpectedTreeDigests[i][:]) ||
++			receipt.ContextStreamDigests[i] != strings.TrimPrefix(vroaCString(expected.ExpectedStreamDigests[i][:]), "sha256:") ||
++			receipt.ContextStreamLengths[i] != expected.ExpectedStreamLengths[i] {
++			return receipt, fmt.Errorf("signed C4 candidate receipt context %d differs from BuildKit request", i)
++		}
++	}
++	return receipt, nil
++}
++
++func (s *VROAV3Service) sendV3Request(ctx context.Context, req vroaV3RequestFrame, fds []int) (vroaV3ResponseFrame, error) {
++	var resp vroaV3ResponseFrame
++	if !s.devAllowSameUID {
++		if err := s.socketChecker.verifySocketPath(); err != nil {
++			return resp, err
++		}
++	}
++	payload, err := vroaEncodeBinary(req)
++	if err != nil {
++		return resp, err
++	}
++	dialer := net.Dialer{Timeout: 4 * time.Second}
++	conn, err := dialer.DialContext(ctx, "unix", s.socketPath)
++	if err != nil {
++		return resp, err
++	}
++	defer conn.Close()
++	if err := s.socketChecker.verifyConnectedPeer(conn); err != nil {
++		return resp, err
++	}
++	if err := conn.SetDeadline(time.Now().Add(4 * time.Second)); err != nil {
++		return resp, err
++	}
++
++	unixConn := conn.(*net.UnixConn)
++	rawConn, err := unixConn.SyscallConn()
++	if err != nil {
++		return resp, err
++	}
++	var oob []byte
++	if len(fds) > 0 {
++		oob = syscall.UnixRights(fds...)
++	}
++	var sendErr error
++	ctrlErr := rawConn.Write(func(sockFD uintptr) bool {
++		for len(payload) > 0 {
++			n, err := syscall.SendmsgN(int(sockFD), payload, oob, nil, 0)
++			if n > 0 {
++				payload = payload[n:]
++				oob = nil
++			}
++			if err == syscall.EINTR {
++				continue
++			}
++			if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
++				return false
++			}
++			if err != nil {
++				sendErr = err
++				return true
++			}
++			if n == 0 {
++				sendErr = errors.New("zero-byte sendmsg progress")
++				return true
++			}
++		}
++		return true
++	})
++	if ctrlErr != nil {
++		return resp, ctrlErr
++	}
++	earlyPeerClose := sendErr == syscall.EPIPE || sendErr == syscall.ECONNRESET
++	if sendErr != nil && !earlyPeerClose {
++		return resp, sendErr
++	}
++	if !earlyPeerClose {
++		if err := unixConn.CloseWrite(); err != nil && !errors.Is(err, syscall.ENOTCONN) && !errors.Is(err, syscall.EPIPE) {
++			return resp, err
++		}
++	}
++
++	respBuf := make([]byte, binary.Size(resp))
++	if _, err := io.ReadFull(conn, respBuf); err != nil {
++		return resp, err
++	}
++	if err := binary.Read(bytes.NewReader(respBuf), binary.LittleEndian, &resp); err != nil {
++		return resp, err
++	}
++	if string(resp.Magic[:]) != vroaMagicV3 || resp.Version != vroaProtocolVersionV3 {
++		return resp, errors.New("invalid VROA_V3 response magic or version")
++	}
++	return resp, nil
++}
++
++func createSealedMemfdV3(name string, data []byte) (int, error) {
++	rwFD, err := unix.MemfdCreate(name, unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
++	if err != nil {
++		return -1, fmt.Errorf("memfd_create(%s): %w", name, err)
++	}
++	defer func() { _ = syscall.Close(rwFD) }()
++
++	for off := 0; off < len(data); {
++		n, err := syscall.Write(rwFD, data[off:])
++		if err != nil {
++			if err == syscall.EINTR {
++				continue
++			}
++			return -1, err
++		}
++		if n <= 0 {
++			return -1, errors.New("short write to sealed memfd")
++		}
++		off += n
++	}
++	const sealAll = unix.F_SEAL_WRITE | unix.F_SEAL_GROW | unix.F_SEAL_SHRINK | unix.F_SEAL_SEAL
++	if _, err := unix.FcntlInt(uintptr(rwFD), unix.F_ADD_SEALS, sealAll); err != nil {
++		return -1, fmt.Errorf("F_ADD_SEALS(%s): %w", name, err)
++	}
++	roFD, err := syscall.Open(fmt.Sprintf("/proc/self/fd/%d", rwFD), syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
++	if err != nil {
++		return -1, err
++	}
++	if _, err := syscall.Seek(roFD, 0, io.SeekStart); err != nil {
++		_ = syscall.Close(roFD)
++		return -1, err
++	}
++	return roFD, nil
++}
++
++func vroaSetFixedString(dst []byte, value string) error {
++	if len(value) >= len(dst) || strings.IndexByte(value, 0) >= 0 {
++		return fmt.Errorf("fixed field length/NUL violation (%d >= %d)", len(value), len(dst))
++	}
++	clear(dst)
++	copy(dst, value)
++	return nil
++}
++
++func vroaCString(src []byte) string {
++	if idx := bytes.IndexByte(src, 0); idx >= 0 {
++		return string(src[:idx])
++	}
++	return string(src)
++}
++
++func vroaEncodeBinary(value any) ([]byte, error) {
++	var buf bytes.Buffer
++	if err := binary.Write(&buf, binary.LittleEndian, value); err != nil {
++		return nil, err
++	}
++	return buf.Bytes(), nil
++}
+diff --git a/util/localcontext/service_vroa_v3_linux_test.go b/util/localcontext/service_vroa_v3_linux_test.go
+new file mode 100644
+index 0000000..3959cc3
+--- /dev/null
++++ b/util/localcontext/service_vroa_v3_linux_test.go
+@@ -0,0 +1,679 @@
++//go:build linux
++
++package localcontext
++
++import (
++	"bytes"
++	"context"
++	"crypto/ed25519"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/binary"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"net"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"syscall"
++	"testing"
++	"time"
++)
++
++func compileC4DaemonForBuildKitTest(t *testing.T, testBuild bool) string {
++	t.Helper()
++	// Locate native-owner-authority relative to this BuildKit worktree when present.
++	candidates := []string{
++		filepath.Join("..", "..", "..", "virki-c1-c4-native-bridge-20261119", "infra", "offline", "native-owner-authority"),
++		filepath.Join("..", "..", "infra", "offline", "native-owner-authority"),
++	}
++	if explicit := os.Getenv("VIRKI_C4_TEST_SOURCE_DIR"); explicit != "" {
++		candidates = []string{explicit}
++	}
++	var root string
++	for _, c := range candidates {
++		abs, err := filepath.Abs(c)
++		if err == nil {
++			if _, stErr := os.Stat(filepath.Join(abs, "native-owner-authority.c")); stErr == nil {
++				root = abs
++				break
++			}
++		}
++	}
++	if root == "" {
++		if os.Getenv("VIRKI_C4_TEST_SOURCE_DIR") != "" {
++			t.Fatal("configured C4 test source is missing")
++		}
++		t.Skip("native-owner-authority C source not present adjacent to BuildKit worktree")
++	}
++	out := filepath.Join(t.TempDir(), "native-owner-authority-v3")
++	args := []string{"-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-D_FORTIFY_SOURCE=2", "-fstack-protector-strong", "-fPIE", "-pie", "-Wl,-z,relro,-z,now"}
++	if testBuild {
++		args = append(args, "-DVIRKI_OWNER_TEST_BUILD")
++	}
++	args = append(args, "-o", out, "native-owner-authority.c")
++	cmd := exec.Command("gcc", args...)
++	cmd.Dir = root
++	if raw, err := cmd.CombinedOutput(); err != nil {
++		t.Fatalf("compile C4 daemon: %v\n%s", err, raw)
++	}
++	return out
++}
++
++func buildSignedV3Approval(t *testing.T, ownerPub ed25519.PublicKey, ownerPriv ed25519.PrivateKey, nonceHex string, streams [4][]byte, treeDigests [4]string, exporter ExporterIntent, image ImageDescriptor) ([]byte, string) {
++	t.Helper()
++	spkiPrefix := []byte{0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00}
++	pinSum := sha256.Sum256(append(spkiPrefix, ownerPub...))
++	pinHex := hex.EncodeToString(pinSum[:])
++
++	var env vroaV3ApprovalEnvelope
++	copy(env.Magic[:], vroaApprovalMagicV3)
++	env.Version = vroaProtocolVersionV3
++	env.Epoch = 1
++	env.ExpiresUnix = uint64(time.Now().Add(10 * time.Minute).Unix())
++	env.WorkerUID = 10001
++	env.WorkerGID = 10001
++	env.ContextCount = 4
++	_ = vroaSetFixedString(env.KeyID[:], "owner-test-key")
++	_ = vroaSetFixedString(env.PublicKeyPinSHA256[:], pinHex)
++	_ = vroaSetFixedString(env.ApprovalID[:], "apr-buildkit-v3")
++	_ = vroaSetFixedString(env.ApprovalSerial[:], "ser-buildkit-01")
++	_ = vroaSetFixedString(env.JobID[:], "job-buildkit-v3")
++	_ = vroaSetFixedString(env.Role[:], "runtime")
++	_ = vroaSetFixedString(env.Nonce[:], nonceHex)
++	_ = vroaSetFixedString(env.SourceCommit[:], strings.Repeat("a", 40))
++	_ = vroaSetFixedString(env.BuildPlanSHA256[:], strings.Repeat("b", 64))
++	_ = vroaSetFixedString(env.ExecutablePolicySHA256[:], strings.Repeat("c", 64))
++	_ = vroaSetFixedString(env.ExporterIntentSHA256[:], strings.TrimPrefix(exporter.AttributesDigest, "sha256:"))
++	_ = vroaSetFixedString(env.OutputImageID[:], image.Digest)
++	_ = vroaSetFixedString(env.FileSyncManifestSHA256[:], strings.Repeat("d", 64))
++	_ = vroaSetFixedString(env.IgnorePolicySHA256[:], strings.Repeat("e", 64))
++	_ = vroaSetFixedString(env.WorkerID[:], "worker-buildkit-1")
++	_ = vroaSetFixedString(env.DockerfileSHA256[:], strings.Repeat("f", 64))
++	_ = vroaSetFixedString(env.IgnorePath[:], ".dockerignore")
++	_ = vroaSetFixedString(env.IgnoreSHA256[:], strings.Repeat("1", 64))
++	env.IgnorePresent = 1
++	_ = vroaSetFixedString(env.IgnoreSource[:], "preferred")
++
++	for i, name := range requiredContexts {
++		sum := sha256.Sum256(streams[i])
++		_ = vroaSetFixedString(env.Contexts[i].Name[:], name)
++		_ = vroaSetFixedString(env.Contexts[i].SessionID[:], "sess-"+name)
++		_ = vroaSetFixedString(env.Contexts[i].Identity[:], "ctxid-"+name)
++		_ = vroaSetFixedString(env.Contexts[i].TreeDigest[:], treeDigests[i])
++		_ = vroaSetFixedString(env.Contexts[i].StreamDigest[:], "sha256:"+hex.EncodeToString(sum[:]))
++		env.Contexts[i].StreamLength = uint64(len(streams[i]))
++	}
++	unsigned, err := vroaEncodeBinary(env)
++	if err != nil {
++		t.Fatal(err)
++	}
++	bodyLen := len(unsigned) - ed25519.SignatureSize
++	msg := append([]byte(vroaApprovalDomainV3), unsigned[:bodyLen]...)
++	copy(env.Signature[:], ed25519.Sign(ownerPriv, msg))
++	raw, err := vroaEncodeBinary(env)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return raw, pinHex
++}
++
++// Match the deterministic FileSync stream and tree encodings used by the
++// immutable worker observation; this fixture does not use a real build worker.
++func testVROAV3ContextStream(name string) ([]byte, string, int64) {
++	var stream, tree bytes.Buffer
++	stream.WriteString("virki-context-stream-v1\x00")
++	tree.WriteString("buildkit-worker-local-context-v2\x00")
++	writeUint := func(b *bytes.Buffer, value uint64) {
++		var encoded [8]byte
++		binary.BigEndian.PutUint64(encoded[:], value)
++		b.Write(encoded[:])
++	}
++	writeSized := func(b *bytes.Buffer, value string) {
++		writeUint(b, uint64(len(value)))
++		b.WriteString(value)
++	}
++	writeSized(&stream, name)
++	data := []byte("DEV fixture for " + name + "\n")
++	for _, b := range []*bytes.Buffer{&stream, &tree} {
++		b.WriteByte('F')
++		writeSized(b, "evidence.txt")
++		writeUint(b, 0644)
++		writeUint(b, uint64(len(data)))
++	}
++	stream.Write(data)
++	sum := sha256.Sum256(data)
++	tree.Write(sum[:])
++	treeSum := sha256.Sum256(tree.Bytes())
++	return stream.Bytes(), "sha256:" + hex.EncodeToString(treeSum[:]), int64(len(data))
++}
++
++func testVROAV3OCIProof() *OCIDAGProof {
++	desc := func(media string, blob []byte) ImageDescriptor {
++		sum := sha256.Sum256(blob)
++		return ImageDescriptor{MediaType: media, Digest: "sha256:" + hex.EncodeToString(sum[:]), Size: int64(len(blob))}
++	}
++	layer := make([]byte, 1024)
++	ld := desc("application/vnd.oci.image.layer.v1.tar", layer)
++	config := []byte(fmt.Sprintf(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["%s"]}}`, ld.Digest))
++	cd := desc("application/vnd.oci.image.config.v1+json", config)
++	manifest := []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"%s","digest":"%s","size":%d},"layers":[{"mediaType":"%s","digest":"%s","size":%d}]}`, cd.MediaType, cd.Digest, cd.Size, ld.MediaType, ld.Digest, ld.Size))
++	md := desc("application/vnd.oci.image.manifest.v1+json", manifest)
++	proof := &OCIDAGProof{SchemaVersion: 2, Root: md}
++	for i, blob := range [][]byte{manifest, config, layer} {
++		d := []ImageDescriptor{md, cd, ld}[i]
++		node := OCIDAGNode{MediaType: d.MediaType, Digest: d.Digest, Size: d.Size}
++		if i == 0 {
++			node.Role = "root"
++		}
++		proof.Nodes = append(proof.Nodes, node)
++		proof.BlobBytes = append(proof.BlobBytes, blob...)
++	}
++	return proof
++}
++
++func TestVROAV3BeginRejectsMismatchedExporterIntentBeforeNativeTransfer(t *testing.T) {
++	ownerPub, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	approvedExporter, err := NewExporterIntent("image", 0, map[string]string{"name": "127.0.0.1:5000/virki/approved:dev"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	requestedExporter, err := NewExporterIntent("image", 0, map[string]string{"name": "127.0.0.1:5000/virki/unapproved:dev"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	imageDesc := testVROAV3OCIProof().Root
++	var streams [4][]byte
++	var treeDigests [4]string
++	for i, name := range requiredContexts {
++		streams[i], treeDigests[i], _ = testVROAV3ContextStream(name)
++	}
++	nonceRaw := make([]byte, 16)
++	if _, err := rand.Read(nonceRaw); err != nil {
++		t.Fatal(err)
++	}
++	nonceHex := hex.EncodeToString(nonceRaw)
++	rawEnv, pinHex := buildSignedV3Approval(t, ownerPub, ownerPriv, nonceHex, streams, treeDigests, approvedExporter, imageDesc)
++
++	service := &VROAV3Service{
++		socketPath:      filepath.Join(t.TempDir(), "missing-owner.sock"),
++		devAllowSameUID: true,
++		scopes:          make(map[string]vroaV3ScopeState),
++		opt: VROAV3Options{
++			Epoch:             1,
++			ApprovalPublicKey: ownerPub,
++			ApprovalKeyID:     "owner-test-key",
++			ApprovalPinSHA256: pinHex,
++			ExpectedImage:     imageDesc,
++		},
++	}
++	_, err = service.Begin(context.Background(), Binding{
++		JobID:            "job-buildkit-v3",
++		Role:             "runtime",
++		Nonce:            nonceHex,
++		ApprovalID:       "apr-buildkit-v3",
++		ApprovalEnvelope: base64.StdEncoding.EncodeToString(rawEnv),
++		Exporter:         requestedExporter,
++	})
++	if err == nil || !strings.Contains(err.Error(), "exporter intent") {
++		t.Fatalf("Begin must reject a binding whose exporter differs from the signed approval before native transfer; got %v", err)
++	}
++
++	configuredService := &VROAV3Service{
++		socketPath:      filepath.Join(t.TempDir(), "missing-configured-owner.sock"),
++		devAllowSameUID: true,
++		scopes:          make(map[string]vroaV3ScopeState),
++		opt: VROAV3Options{
++			Epoch:             1,
++			ApprovalPublicKey: ownerPub,
++			ApprovalKeyID:     "owner-test-key",
++			ApprovalPinSHA256: pinHex,
++			ExpectedImage:     imageDesc,
++			ExporterPolicy:    requestedExporter,
++		},
++	}
++	_, err = configuredService.Begin(context.Background(), Binding{
++		JobID:            "job-buildkit-v3",
++		Role:             "runtime",
++		Nonce:            nonceHex,
++		ApprovalID:       "apr-buildkit-v3",
++		ApprovalEnvelope: base64.StdEncoding.EncodeToString(rawEnv),
++		Exporter:         approvedExporter,
++	})
++	if err == nil || !strings.Contains(err.Error(), "configured exporter policy") {
++		t.Fatalf("Begin must reject a configured exporter policy that differs from the solve binding; got %v", err)
++	}
++
++	// Exercise the validation branch with malformed caller-supplied bindings,
++	// not only a structurally valid intent whose signed digest differs.
++	for _, tc := range []struct {
++		name   string
++		mutate func(*ExporterIntent)
++	}{
++		{"schema-version", func(intent *ExporterIntent) { intent.SchemaVersion = 1 }},
++		{"exporter-id", func(intent *ExporterIntent) { intent.ID = 1 }},
++		{"exporter-type", func(intent *ExporterIntent) { intent.Type = "local" }},
++		{"empty-destination", func(intent *ExporterIntent) { intent.Destination = "" }},
++		{"wildcard-destination", func(intent *ExporterIntent) { intent.Destination = "*" }},
++		{"malformed-attributes-digest", func(intent *ExporterIntent) { intent.AttributesDigest = "sha256:not-a-digest" }},
++	} {
++		t.Run("invalid-binding-"+tc.name, func(t *testing.T) {
++			invalidBindingExporter := approvedExporter
++			tc.mutate(&invalidBindingExporter)
++			_, err := service.Begin(context.Background(), Binding{
++				JobID:            "job-buildkit-v3",
++				Role:             "runtime",
++				Nonce:            nonceHex,
++				ApprovalID:       "apr-buildkit-v3",
++				ApprovalEnvelope: base64.StdEncoding.EncodeToString(rawEnv),
++				Exporter:         invalidBindingExporter,
++			})
++			if err == nil || !strings.Contains(err.Error(), "invalid exporter intent") {
++				t.Fatalf("Begin must reject malformed binding exporter intent before native transfer; got %v", err)
++			}
++		})
++	}
++}
++
++func TestVROAV3ServiceWithRealManagerAndNativeDaemon(t *testing.T) {
++	for _, testBuild := range []bool{true, false} {
++		name := "production-signing-disabled"
++		if testBuild {
++			name = "dev-test-build-candidate-receipt"
++		}
++		t.Run(name, func(t *testing.T) {
++			bin := compileC4DaemonForBuildKitTest(t, testBuild)
++			ownerPub, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
++			if err != nil {
++				t.Fatal(err)
++			}
++			receiptPub, receiptPriv, err := ed25519.GenerateKey(rand.Reader)
++			if err != nil {
++				t.Fatal(err)
++			}
++
++			dir := t.TempDir()
++			if err := os.Chmod(dir, 0700); err != nil {
++				t.Fatal(err)
++			}
++			ledgerDir := filepath.Join(dir, "ledger")
++			if err := os.Mkdir(ledgerDir, 0700); err != nil {
++				t.Fatal(err)
++			}
++			appPubPath := filepath.Join(dir, "approval.pub")
++			if err := os.WriteFile(appPubPath, ownerPub, 0400); err != nil {
++				t.Fatal(err)
++			}
++			_ = os.Chmod(appPubPath, 0400)
++
++			exporterIntent, err := NewExporterIntent("image", 0, map[string]string{"name": "127.0.0.1:5000/virki/test:dev"})
++			if err != nil {
++				t.Fatal(err)
++			}
++			ociDAG := testVROAV3OCIProof()
++			imageDesc := ociDAG.Root
++			var streams [4][]byte
++			var treeDigests [4]string
++			var regularBytes [4]int64
++			var entryCounts [4]int
++			for i, ctxName := range requiredContexts {
++				streams[i], treeDigests[i], regularBytes[i], entryCounts[i] = testVROAV3PhysicalContextStream(t, ctxName)
++			}
++			nonceRaw := make([]byte, 16)
++			_, _ = rand.Read(nonceRaw)
++			nonceHex := hex.EncodeToString(nonceRaw)
++
++			rawEnv, pinHex := buildSignedV3Approval(t, ownerPub, ownerPriv, nonceHex, streams, treeDigests, exporterIntent, imageDesc)
++			sockPath := filepath.Join(dir, "owner.sock")
++			args := []string{
++				"--socket", sockPath,
++				"--ledger-dir", ledgerDir,
++				"--dev-allow-same-uid",
++				"--approval-public-key-file", appPubPath,
++				"--approval-key-id", "owner-test-key",
++				"--approval-pin-sha256", pinHex,
++			}
++			if testBuild {
++				recKeyPath := filepath.Join(dir, "receipt.key")
++				if err := os.WriteFile(recKeyPath, receiptPriv, 0400); err != nil {
++					t.Fatal(err)
++				}
++				_ = os.Chmod(recKeyPath, 0400)
++				args = append(args, "--key-file", recKeyPath, "--key-id", "c4-test-receipt")
++			}
++
++			cmd := exec.Command(bin, args...)
++			if err := cmd.Start(); err != nil {
++				t.Fatal(err)
++			}
++			t.Cleanup(func() {
++				if cmd.Process != nil {
++					_ = cmd.Process.Signal(syscall.SIGTERM)
++					_ = cmd.Wait()
++				}
++			})
++			deadline := time.Now().Add(5 * time.Second)
++			for time.Now().Before(deadline) {
++				if _, err := os.Stat(sockPath); err == nil {
++					break
++				}
++				time.Sleep(10 * time.Millisecond)
++			}
++
++			// Production constructor must refuse same-UID socket and missing/identical keys.
++			if _, sameUIDErr := NewVROAV3Service(sockPath, uint32(os.Getuid()), VROAV3Options{
++				Epoch:             1,
++				ApprovalPublicKey: ownerPub,
++			}); sameUIDErr == nil {
++				t.Fatal("NewVROAV3Service must refuse same-UID socket")
++			}
++			if _, missingKeyErr := NewVROAV3Service(sockPath, 0, VROAV3Options{
++				Epoch:             1,
++				ApprovalKeyID:     "owner-test-key",
++				ApprovalPinSHA256: pinHex,
++				ExpectedImage:     imageDesc,
++			}); missingKeyErr == nil {
++				t.Fatal("NewVROAV3Service must fail closed when ApprovalPublicKey is missing")
++			}
++			if _, missingImgErr := NewVROAV3Service(sockPath, 0, VROAV3Options{
++				Epoch:             1,
++				ApprovalPublicKey: ownerPub,
++				ApprovalKeyID:     "owner-test-key",
++				ApprovalPinSHA256: pinHex,
++			}); missingImgErr == nil {
++				t.Fatal("NewVROAV3Service must fail closed when ExpectedImage is missing")
++			}
++			svc := &VROAV3Service{
++				socketChecker:   &UnixSocketService{path: sockPath, ownerUID: uint32(os.Getuid())},
++				socketPath:      sockPath,
++				devAllowSameUID: true,
++				scopes:          make(map[string]vroaV3ScopeState),
++				opt: VROAV3Options{
++					Epoch:             1,
++					ApprovalPublicKey: ownerPub,
++					ApprovalKeyID:     "owner-test-key",
++					ApprovalPinSHA256: pinHex,
++					ReceiptPublicKey:  receiptPub,
++					ReceiptKeyID:      "c4-test-receipt",
++					ExporterPolicy:    exporterIntent,
++					ExpectedImage:     imageDesc,
++				},
++			}
++
++			mgr, err := NewManager(svc, true)
++			if err != nil {
++				t.Fatal(err)
++			}
++			ctx, scope, err := mgr.BeginSolve(context.Background(), Binding{
++				JobID:            "job-buildkit-v3",
++				Role:             "runtime",
++				Nonce:            nonceHex,
++				ApprovalID:       "apr-buildkit-v3",
++				ApprovalEnvelope: base64.StdEncoding.EncodeToString(rawEnv),
++				Exporter:         exporterIntent,
++			})
++			if err != nil {
++				t.Fatalf("BeginSolve: %v", err)
++			}
++
++			for i, ctxName := range requiredContexts {
++				sum := sha256.Sum256(streams[i])
++				vSum := sha256.Sum256([]byte("vertex-" + ctxName))
++				vDigest := "sha256:" + hex.EncodeToString(vSum[:])
++				if err := mgr.ContextConsumed(ctx, Consumption{
++					Name:              ctxName,
++					WorkerID:          "worker-buildkit-1",
++					SessionID:         "sess-" + ctxName,
++					VertexDigest:      vDigest,
++					VertexOutputIndex: 0,
++					SnapshotID:        "snap-" + ctxName,
++					TreeDigestSchema:  LocalContextTreeDigestSchemaV2,
++					TreeDigest:        treeDigests[i],
++					StreamDigest:      "sha256:" + hex.EncodeToString(sum[:]),
++					StreamLength:      int64(len(streams[i])),
++					StreamBytes:       streams[i],
++					RegularFileBytes:  regularBytes[i],
++					EntryCount:        entryCounts[i],
++				}); err != nil {
++					t.Fatalf("ContextConsumed(%s): %v", ctxName, err)
++				}
++			}
++
++			var causalPaths []ContextPath
++			for i, ctxName := range requiredContexts {
++				vSum := sha256.Sum256([]byte("vertex-" + ctxName))
++				vDigest := "sha256:" + hex.EncodeToString(vSum[:])
++				causalPaths = append(causalPaths, ContextPath{
++					Name:               ctxName,
++					Generation:         nonceHex,
++					ContextIdentity:    "ctxid-" + ctxName,
++					SnapshotID:         "snap-" + ctxName,
++					TreeDigest:         treeDigests[i],
++					SourceVertexDigest: vDigest,
++					SourceOutputIndex:  0,
++					Edges: []CausalEdge{
++						{
++							ParentVertexDigest: "sha256:" + strings.Repeat("9", 64),
++							ParentOutputIndex:  0,
++							ParentInputIndex:   i,
++							ChildVertexDigest:  vDigest,
++							ChildOutputIndex:   0,
++						},
++					},
++				})
++			}
++			proof := CausalityProof{
++				SchemaVersion: 3,
++				Exporter:      exporterIntent,
++				Roots: []CausalRoot{
++					{
++						WorkerID:     "worker-buildkit-1",
++						RefID:        "ref-root-1",
++						VertexDigest: "sha256:" + strings.Repeat("9", 64),
++						OutputIndex:  0,
++						ContextPaths: causalPaths,
++					},
++				},
++			}
++			proof.ProofDigest, err = CausalityProofDigest(proof)
++			if err != nil {
++				t.Fatal(err)
++			}
++			ociDAG.ProofDigest, err = OCIDAGProofDigest(*ociDAG)
++			if err != nil {
++				t.Fatal(err)
++			}
++
++			completeErr := scope.Complete(ctx, Output{
++				WorkerID:  "worker-buildkit-1",
++				Image:     imageDesc,
++				Causality: proof,
++				OCIDAG:    ociDAG,
++			})
++			if testBuild {
++				if completeErr != nil {
++					t.Fatalf("Complete in test build failed: %v", completeErr)
++				}
++				receipt, ok := svc.LastReceipt()
++				if !ok {
++					t.Fatal("expected verified DEV receipt")
++				}
++				if receipt.DeployAuthorized || receipt.WorkerReceiptPairAdmitted || receipt.ReleaseSignature {
++					t.Fatalf("receipt invariants violated: %+v", receipt)
++				}
++				if binary.Size(vroaV3ApprovalEnvelope{}) != 2669 {
++					t.Fatalf("unexpected approval envelope size: %d", binary.Size(vroaV3ApprovalEnvelope{}))
++				}
++			} else {
++				var disabledErr *VROAV3SigningDisabledError
++				if !errors.As(completeErr, &disabledErr) || disabledErr.Status != 22 {
++					t.Fatalf("expected VROAV3SigningDisabledError(22) in production build, got %v", completeErr)
++				}
++				if err := scope.Abort(ctx, errors.New("cleanup after production verification")); err != nil {
++					t.Fatalf("Abort after production verification: %v", err)
++				}
++			}
++		})
++	}
++}
++
++func TestVROAV3AbortRetainsScopeOnTransientErrorAndReconcilesAlreadyAborted(t *testing.T) {
++	bin := compileC4DaemonForBuildKitTest(t, false)
++	ownerPub, ownerPriv, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	dir := t.TempDir()
++	_ = os.Chmod(dir, 0700)
++	ledgerDir := filepath.Join(dir, "ledger")
++	_ = os.Mkdir(ledgerDir, 0700)
++	appPubPath := filepath.Join(dir, "approval.pub")
++	_ = os.WriteFile(appPubPath, ownerPub, 0400)
++	_ = os.Chmod(appPubPath, 0400)
++
++	exporterIntent, err := NewExporterIntent("image", 0, map[string]string{"name": "127.0.0.1:5000/virki/test:dev"})
++	if err != nil {
++		t.Fatal(err)
++	}
++	imageDesc := ImageDescriptor{
++		MediaType: "application/vnd.oci.image.manifest.v1+json",
++		Digest:    "sha256:" + strings.Repeat("2", 64),
++		Size:      2048,
++	}
++	var streams [4][]byte
++	var treeDigests [4]string
++	for i, ctxName := range requiredContexts {
++		streams[i] = []byte("stream-" + ctxName + "-abort")
++		sum := sha256.Sum256([]byte("tree-" + ctxName))
++		treeDigests[i] = "sha256:" + hex.EncodeToString(sum[:])
++	}
++	nonceRaw := make([]byte, 16)
++	_, _ = rand.Read(nonceRaw)
++	nonceHex := hex.EncodeToString(nonceRaw)
++	rawEnv, pinHex := buildSignedV3Approval(t, ownerPub, ownerPriv, nonceHex, streams, treeDigests, exporterIntent, imageDesc)
++
++	sockPath := filepath.Join(dir, "owner.sock")
++	cmd := exec.Command(bin,
++		"--socket", sockPath,
++		"--ledger-dir", ledgerDir,
++		"--dev-allow-same-uid",
++		"--approval-public-key-file", appPubPath,
++		"--approval-key-id", "owner-test-key",
++		"--approval-pin-sha256", pinHex,
++	)
++	if err := cmd.Start(); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if cmd.Process != nil {
++			_ = cmd.Process.Signal(syscall.SIGTERM)
++			_ = cmd.Wait()
++		}
++	})
++	deadline := time.Now().Add(5 * time.Second)
++	for time.Now().Before(deadline) {
++		if _, err := os.Stat(sockPath); err == nil {
++			break
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++
++	svc := &VROAV3Service{
++		socketChecker:   &UnixSocketService{path: sockPath, ownerUID: uint32(os.Getuid()), allowGroupSocketWrite: true},
++		socketPath:      sockPath,
++		devAllowSameUID: true,
++		scopes:          make(map[string]vroaV3ScopeState),
++		opt: VROAV3Options{
++			Epoch:             1,
++			ApprovalPublicKey: ownerPub,
++			ApprovalKeyID:     "owner-test-key",
++			ApprovalPinSHA256: pinHex,
++			ExporterPolicy:    exporterIntent,
++			ExpectedImage:     imageDesc,
++		},
++	}
++	auth, err := svc.Begin(context.Background(), Binding{
++		JobID:            "job-buildkit-v3",
++		Role:             "runtime",
++		Nonce:            nonceHex,
++		ApprovalID:       "apr-buildkit-v3",
++		ApprovalEnvelope: base64.StdEncoding.EncodeToString(rawEnv),
++		Exporter:         exporterIntent,
++	})
++	if err != nil {
++		t.Fatalf("Begin: %v", err)
++	}
++
++	// Simulate transient transport failure on first Abort; scope MUST be retained.
++	svc.socketPath = filepath.Join(dir, "missing.sock")
++	if err := svc.Abort(context.Background(), auth.Token, "transient"); err == nil {
++		t.Fatal("expected transient error on missing socket")
++	}
++	svc.mu.Lock()
++	savedScope, retained := svc.scopes[auth.Token]
++	svc.mu.Unlock()
++	if !retained {
++		t.Fatal("Abort discarded scope state on transient transport failure")
++	}
++
++	// Retry against live daemon succeeds.
++	svc.socketPath = sockPath
++	if err := svc.Abort(context.Background(), auth.Token, "retry"); err != nil {
++		t.Fatalf("Abort retry failed: %v", err)
++	}
++	svc.mu.Lock()
++	_, stillPresent := svc.scopes[auth.Token]
++	svc.mu.Unlock()
++	if stillPresent {
++		t.Fatal("Abort did not clear scope after acknowledged abort")
++	}
++
++	// Simulate lost ACK on an already-aborted scope (C4 returns ERR_SCOPE_ABORTED=21).
++	svc.mu.Lock()
++	svc.scopes[auth.Token] = savedScope
++	svc.mu.Unlock()
++	if err := svc.Abort(context.Background(), auth.Token, "lost-ack-retry"); err != nil {
++		t.Fatalf("Abort reconciliation on ERR_SCOPE_ABORTED failed: %v", err)
++	}
++}
++
++func TestVROAV3CrossUIDSocketModePolicy(t *testing.T) {
++	dir := t.TempDir()
++	sock := filepath.Join(dir, "cross.sock")
++	ln, err := net.Listen("unix", sock)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer ln.Close()
++
++	if err := os.Chmod(sock, 0660); err != nil {
++		t.Fatal(err)
++	}
++	info, err := os.Lstat(sock)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stat := info.Sys().(*syscall.Stat_t)
++	if !callerInGroup(stat.Gid) {
++		t.Fatalf("expected caller to be in socket gid %d", stat.Gid)
++	}
++	// v1 (allowGroupSocketWrite=false) must reject 0660; V3 (allowGroupSocketWrite=true) only fails on same-UID in dev.
++	v1Svc := &UnixSocketService{path: sock, ownerUID: stat.Uid, allowGroupSocketWrite: false}
++	if err := v1Svc.verifySocketPath(); err == nil || !strings.Contains(err.Error(), "same-UID") && !strings.Contains(err.Error(), "group-write") && !strings.Contains(err.Error(), "not trusted") {
++		t.Fatalf("unexpected v1 verifySocketPath result: %v", err)
++	}
++	// World-writable 0662 must always be rejected by verifySocketPath even when allowGroupSocketWrite=true.
++	if err := os.Chmod(sock, 0662); err != nil {
++		t.Fatal(err)
++	}
++	v3Svc := &UnixSocketService{path: sock, ownerUID: 0, allowGroupSocketWrite: true}
++	if err := v3Svc.verifySocketPath(); err == nil {
++		t.Fatal("verifySocketPath must reject world-writable 0662 socket")
++	}
++}
+diff --git a/util/localcontext/service_vroa_v3_physical_stream_linux_test.go b/util/localcontext/service_vroa_v3_physical_stream_linux_test.go
+new file mode 100644
+index 0000000..e34202a
+--- /dev/null
++++ b/util/localcontext/service_vroa_v3_physical_stream_linux_test.go
+@@ -0,0 +1,64 @@
++//go:build linux
++
++package localcontext
++
++import (
++	"encoding/base64"
++	"encoding/json"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"runtime"
++	"testing"
++)
++
++// Run the real BuildKit C1 filesystem producer in a separate process so that
++// the localcontext package does not import filesync and create an import cycle.
++// The generated bytes are used by the existing manager -> native C4 test.
++func testVROAV3PhysicalContextStream(t *testing.T, name string) ([]byte, string, int64, int) {
++	t.Helper()
++	root := t.TempDir()
++	if err := os.Mkdir(filepath.Join(root, "sub"), 0755); err != nil {
++		t.Fatal(err)
++	}
++	data := []byte("DEV BuildKit physical context " + name + "\n")
++	if err := os.WriteFile(filepath.Join(root, "sub", "evidence.txt"), data, 0644); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Symlink("sub/evidence.txt", filepath.Join(root, "zz-link")); err != nil {
++		t.Fatal(err)
++	}
++	cwd, err := os.Getwd()
++	if err != nil {
++		t.Fatal(err)
++	}
++	repoRoot := filepath.Clean(filepath.Join(cwd, "..", ".."))
++	binary := filepath.Join(runtime.GOROOT(), "bin", "go")
++	cmd := exec.Command(binary, "run", "-mod=vendor", "./cmd/virki-c1-dev-stream", root, name)
++	cmd.Dir = repoRoot
++	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local")
++	raw, err := cmd.CombinedOutput()
++	if err != nil {
++		t.Fatalf("real BuildKit C1 producer failed: %v: %s", err, raw)
++	}
++	var proof struct {
++		Name             string
++		TreeDigest       string
++		StreamDigest     string
++		StreamBase64     string
++		RegularFileBytes int64
++		EntryCount       int
++	}
++	if err := json.Unmarshal(raw, &proof); err != nil {
++		t.Fatalf("real BuildKit C1 producer emitted invalid JSON: %v", err)
++	}
++	stream, err := base64.StdEncoding.DecodeString(proof.StreamBase64)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if proof.Name != name || proof.EntryCount != 3 || proof.RegularFileBytes != int64(len(data)) {
++		t.Fatal(fmt.Sprintf("real BuildKit C1 producer returned inconsistent physical records: %+v", proof))
++	}
++	return stream, proof.TreeDigest, proof.RegularFileBytes, proof.EntryCount
++}
+diff --git a/util/localcontext/service_vroa_v3_receipt_binding_linux_test.go b/util/localcontext/service_vroa_v3_receipt_binding_linux_test.go
+new file mode 100644
+index 0000000..2336937
+--- /dev/null
++++ b/util/localcontext/service_vroa_v3_receipt_binding_linux_test.go
+@@ -0,0 +1,136 @@
++//go:build linux
++
++package localcontext
++
++import (
++	"crypto/ed25519"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"strings"
++	"testing"
++)
++
++// The C4 DEV signer is not a release authority. A properly signed candidate
++// receipt for job A must not satisfy BuildKit's request for job B, even if the
++// digest and signature of the original receipt remain completely unchanged.
++func TestVROAV3SignedCandidateReceiptIsBoundToExactBuildKitRequest(t *testing.T) {
++	pub, priv, err := ed25519.GenerateKey(rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	put := func(dst []byte, value string) {
++		t.Helper()
++		if err := vroaSetFixedString(dst, value); err != nil {
++			t.Fatal(err)
++		}
++	}
++	var req vroaV3RequestFrame
++	copy(req.Magic[:], vroaMagicV3)
++	req.Version, req.Cmd, req.Epoch = vroaProtocolVersionV3, vroaCmdV3VerifyCandidate, 7
++	put(req.ScopeToken[:], strings.Repeat("a", 64))
++	put(req.SessionID[:], "worker-a")
++	put(req.JobID[:], "build-job-a")
++	put(req.Role[:], "runtime")
++	put(req.Nonce[:], strings.Repeat("b", 32))
++	put(req.SourceCommit[:], strings.Repeat("c", 40))
++	put(req.BuildPlanSHA256[:], strings.Repeat("d", 64))
++	put(req.ExecutablePolicySHA256[:], strings.Repeat("e", 64))
++	put(req.OutputImageID[:], "sha256:"+strings.Repeat("f", 64))
++	put(req.ArchiveSHA256[:], strings.Repeat("1", 64))
++	put(req.TranscriptSHA256[:], strings.Repeat("2", 64))
++	put(req.ApprovalKeyID[:], "approval-key-a")
++	put(req.ApprovalID[:], "approval-a")
++	put(req.ApprovalSerial[:], "serial-a")
++	put(req.ApprovalEnvelopeSHA256[:], strings.Repeat("3", 64))
++	receipt := VROAV3CandidateReceipt{
++		Version: 3, Status: "CANDIDATE_VERIFIED", OwnerKeyID: "receipt-key-a",
++		ApprovalKeyID: "approval-key-a", ApprovalID: "approval-a", ApprovalSerial: "serial-a",
++		ScopeToken: strings.Repeat("a", 64), ApprovalEnvelopeSHA256: strings.Repeat("3", 64),
++		EvidenceSHA256: strings.Repeat("2", 64), JobID: "build-job-a", Role: "runtime",
++		Nonce: strings.Repeat("b", 32), WorkerID: "worker-a",
++		SourceCommit: strings.Repeat("c", 40), BuildPlanSHA256: strings.Repeat("d", 64),
++		ExecutablePolicySHA256: strings.Repeat("e", 64), FileSyncManifestSHA256: strings.Repeat("1", 64),
++		OutputImageID: "sha256:" + strings.Repeat("f", 64), SequenceNumber: 9, Epoch: 7,
++	}
++	for i := 0; i < 4; i++ {
++		tree := "sha256:" + strings.Repeat(string('4'+rune(i)), 64)
++		stream := strings.Repeat(string('8'+rune(i)), 64)
++		put(req.ExpectedTreeDigests[i][:], tree)
++		put(req.ExpectedStreamDigests[i][:], "sha256:"+stream)
++		req.ExpectedStreamLengths[i] = uint64(101 + i)
++		receipt.ContextTreeDigests = append(receipt.ContextTreeDigests, tree)
++		receipt.ContextStreamDigests = append(receipt.ContextStreamDigests, stream)
++		receipt.ContextStreamLengths = append(receipt.ContextStreamLengths, uint64(101+i))
++	}
++	ack, err := json.Marshal(receipt)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(ack) > len(vroaV3ResponseFrame{}.AckJSON) {
++		t.Fatal("test receipt too large")
++	}
++	var resp vroaV3ResponseFrame
++	copy(resp.Magic[:], vroaMagicV3)
++	resp.Version, resp.Status, resp.Epoch, resp.SequenceNumber = vroaProtocolVersionV3, vroaStatusOK, 7, 9
++	// V3_VERIFY response leaves this unsigned frame field blank. The scope is
++	// authenticated exclusively by the Ed25519-signed AckJSON.
++	put(resp.OwnerKeyID[:], "receipt-key-a")
++	resp.AckJSONLen = uint32(len(ack))
++	copy(resp.AckJSON[:], ack)
++	sum := sha256.Sum256(ack)
++	put(resp.CanonicalAckSHA256[:], hex.EncodeToString(sum[:]))
++	put(resp.SignatureBase64[:], base64.StdEncoding.EncodeToString(ed25519.Sign(priv, append([]byte(vroaReceiptDomainV3), ack...))))
++	service := &VROAV3Service{opt: VROAV3Options{ReceiptPublicKey: pub, ReceiptKeyID: "receipt-key-a"}}
++	if _, err := service.verifyReceipt(resp, req); err != nil {
++		t.Fatalf("positive signed receipt rejected: %v", err)
++	}
++	for _, tc := range []struct {
++		name string
++		edit func(*vroaV3RequestFrame)
++	}{
++		{"other job", func(r *vroaV3RequestFrame) { put(r.JobID[:], "build-job-b") }},
++		{"other worker", func(r *vroaV3RequestFrame) { put(r.SessionID[:], "worker-b") }},
++		{"other scope", func(r *vroaV3RequestFrame) { put(r.ScopeToken[:], strings.Repeat("f", 64)) }},
++		{"other evidence", func(r *vroaV3RequestFrame) { put(r.TranscriptSHA256[:], strings.Repeat("f", 64)) }},
++		{"other approval", func(r *vroaV3RequestFrame) { put(r.ApprovalEnvelopeSHA256[:], strings.Repeat("f", 64)) }},
++		{"other image", func(r *vroaV3RequestFrame) { put(r.OutputImageID[:], "sha256:"+strings.Repeat("e", 64)) }},
++		{"other role", func(r *vroaV3RequestFrame) { put(r.Role[:], "migrator") }},
++		{"other nonce", func(r *vroaV3RequestFrame) { put(r.Nonce[:], strings.Repeat("f", 32)) }},
++		{"other source commit", func(r *vroaV3RequestFrame) { put(r.SourceCommit[:], strings.Repeat("f", 40)) }},
++		{"other manifest", func(r *vroaV3RequestFrame) { put(r.ArchiveSHA256[:], strings.Repeat("f", 64)) }},
++		{"other approval ID", func(r *vroaV3RequestFrame) { put(r.ApprovalID[:], "approval-b") }},
++		{"other approval serial", func(r *vroaV3RequestFrame) { put(r.ApprovalSerial[:], "serial-b") }},
++		{"other tree digest", func(r *vroaV3RequestFrame) { put(r.ExpectedTreeDigests[0][:], "sha256:"+strings.Repeat("e", 64)) }},
++		{"other stream digest", func(r *vroaV3RequestFrame) { put(r.ExpectedStreamDigests[0][:], "sha256:"+strings.Repeat("e", 64)) }},
++		{"other stream length", func(r *vroaV3RequestFrame) { r.ExpectedStreamLengths[0]++ }},
++		{"other epoch", func(r *vroaV3RequestFrame) { r.Epoch++ }},
++		{"wrong command", func(r *vroaV3RequestFrame) { r.Cmd = vroaCmdV3Abort }},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			swapped := req
++			tc.edit(&swapped)
++			if _, err := service.verifyReceipt(resp, swapped); err == nil {
++				t.Fatal("a genuine C4 DEV signed receipt was accepted for another BuildKit request")
++			}
++		})
++	}
++	for _, tc := range []struct {
++		name string
++		edit func(*vroaV3ResponseFrame)
++	}{
++		{"other response epoch", func(r *vroaV3ResponseFrame) { r.Epoch++ }},
++		{"other response sequence", func(r *vroaV3ResponseFrame) { r.SequenceNumber++ }},
++		{"other response scope", func(r *vroaV3ResponseFrame) { put(r.ScopeToken[:], strings.Repeat("e", 64)) }},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			swapped := resp
++			tc.edit(&swapped)
++			if _, err := service.verifyReceipt(swapped, req); err == nil {
++				t.Fatal("signed candidate receipt was accepted with altered response metadata")
++			}
++		})
++	}
++}

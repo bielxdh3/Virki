@@ -125,6 +125,28 @@ test("issuer authorization and interaction HTML responses are never cacheable", 
   assert.equal(policyFor("/interaction/short"), undefined);
 });
 
+test("sensitive OIDC callback, resume, logout and long interaction paths cannot omit no-store", () => {
+  const cacheControl = (pathname: string) => {
+    const fields = new Map<string, string>();
+    setIssuerSensitiveResponseCachePolicy({ setHeader: (key: string, value: string | number | readonly string[]) => {
+      fields.set(key.toLowerCase(), String(value));
+    } } as never, pathname);
+    return fields.get("cache-control");
+  };
+  for (const pathname of [
+    "/auth/abcdefghijklmnop",
+    "/resume/abcdefghijklmnop",
+    "/session/end",
+    "/session/end/confirm",
+    `/interaction/${"x".repeat(120)}`,
+  ]) {
+    assert.equal(cacheControl(pathname), "no-store", `${pathname} may carry an OIDC interaction or redirect`);
+  }
+  for (const pathname of ["/authx", "/resumex", "/session/ender", "/interaction/short", "/jwks"]) {
+    assert.equal(cacheControl(pathname), undefined, `${pathname} is not an authenticated interaction route`);
+  }
+});
+
 test("token responses include the RFC 6749 no-store and no-cache directives", () => {
   const headers = new Map<string, string>();
   setIssuerSensitiveResponseCachePolicy({ setHeader: (name: string, value: string | number | readonly string[]) => {

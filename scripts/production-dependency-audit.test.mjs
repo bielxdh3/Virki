@@ -69,6 +69,16 @@ test("production image includes hoisted workspace runtime dependencies from the 
     "the lockfile must retain Nodemailer as a production runtime dependency");
   assert.ok(copyLines.has("COPY --from=production-dependencies /app/node_modules ./node_modules"),
     "the final image must copy the root runtime tree where npm hoists Nodemailer");
+  const prismaClientAtRoot = Boolean(lock.packages?.["node_modules/@prisma/client"]);
+  const prismaClientAtDatabase = Boolean(lock.packages?.["packages/database/node_modules/@prisma/client"]);
+  assert.notEqual(prismaClientAtRoot, prismaClientAtDatabase,
+    "exactly one Prisma Client install layout must be present in the lockfile");
+  const generatedClientSource = prismaClientAtRoot
+    ? "node_modules/.prisma"
+    : "packages/database/node_modules/.prisma";
+  assert.ok(dockerfile.includes(
+    `cp -a ${generatedClientSource} /runtime-artifacts/node_modules/.prisma;`
+  ), "the build stage must carry the actual generated Prisma client into the root runtime resolution path");
   if (!nestedRuntimePaths.includes("packages/auth/node_modules")) {
     assert.ok(!copyLines.has("COPY --from=production-dependencies /app/packages/auth/node_modules ./packages/auth/node_modules"),
       "the final image must not copy a workspace-local node_modules directory absent from the lockfile");
@@ -86,9 +96,14 @@ test("committed dependency lock respects global exact-version overrides", () => 
   const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
   for (const [name, exactVersion] of Object.entries(manifest.overrides ?? {})) {
     if (typeof exactVersion !== "string") continue;
-    const installedVersion = lock.packages?.[`node_modules/${name}`]?.version;
-    assert.equal(installedVersion, exactVersion,
-      `${name}: a stale lockfile will fail npm ls in the production audit`);
+    const installed = Object.entries(lock.packages ?? {})
+      .filter(([packagePath]) => packagePath === `node_modules/${name}` ||
+        packagePath.endsWith(`/node_modules/${name}`));
+    assert.ok(installed.length > 0, `${name}: the overridden package must exist in the lockfile`);
+    for (const [packagePath, metadata] of installed) {
+      assert.equal(metadata.version, exactVersion,
+        `${name} at ${packagePath}: a stale lockfile will fail npm ls in the production audit`);
+    }
   }
 });
 

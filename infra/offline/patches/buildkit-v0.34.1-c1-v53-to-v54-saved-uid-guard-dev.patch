@@ -1,0 +1,65 @@
+diff --git a/session/filesync/sealed_publication_v53_filesync_broker_linux.go b/session/filesync/sealed_publication_v53_filesync_broker_linux.go
+index e7cad3e33a17cc20bec67f72c4be98df14264cda..0f5b822386e067ca59d9dc2d4f9e81b738f7b3ba 100755
+--- a/session/filesync/sealed_publication_v53_filesync_broker_linux.go
++++ b/session/filesync/sealed_publication_v53_filesync_broker_linux.go
+@@ -340,0 +341,13 @@ func fssyncSealedV53DevWithHooks(ctx context.Context, caller session.Caller,
++// validateV53ReceiverIdentity requires all real, effective, and saved IDs to
++// match the supervisor-assigned nonroot identity. Checking only real/effective
++// IDs would let a receiver retain saved UID/GID 0 and regain those credentials
++// after the policy gate.
++func validateV53ReceiverIdentity(uid, euid, suid, gid, egid, sgid uint32, policy V24ReceiverCustodyPolicy) error {
++	if uid == 0 || euid == 0 || uid != euid || uid != suid ||
++		gid != egid || gid != sgid ||
++		euid != *policy.ExpectedReceiverUID || egid != *policy.ExpectedReceiverGID {
++		return errors.New("C1 V53 receiver real/effective/saved UID and GID must match supervisor policy")
++	}
++	return nil
++}
++
+@@ -352,4 +365,4 @@ func validateV53ReceiverPolicy(policy V24ReceiverCustodyPolicy) error {
+-	if os.Getuid() == 0 || os.Geteuid() == 0 || os.Getuid() != os.Geteuid() ||
+-		os.Getgid() != os.Getegid() || uint32(os.Geteuid()) != *policy.ExpectedReceiverUID ||
+-		uint32(os.Getegid()) != *policy.ExpectedReceiverGID {
+-		return errors.New("C1 V53 receiver process identity differs from supervisor policy")
++	uid, euid, suid := unix.Getresuid()
++	gid, egid, sgid := unix.Getresgid()
++	if err := validateV53ReceiverIdentity(uint32(uid), uint32(euid), uint32(suid), uint32(gid), uint32(egid), uint32(sgid), policy); err != nil {
++		return err
+diff --git a/session/filesync/sealed_publication_v54_saved_uid_guard_linux_test.go b/session/filesync/sealed_publication_v54_saved_uid_guard_linux_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb31111f7fe5f91d3175c8a4525e5af13a69b705
+--- /dev/null
++++ b/session/filesync/sealed_publication_v54_saved_uid_guard_linux_test.go
+@@ -0,0 +1,32 @@
++//go:build linux && virki_c1c4_dev
++
++package filesync
++
++import "testing"
++
++func TestC1V54ReceiverIdentityRejectsSavedRootUIDGID(t *testing.T) {
++	policy := V24ReceiverCustodyPolicy{
++		ExpectedReceiverUID: v53UintPtr(v53ReceiverUID),
++		ExpectedReceiverGID: v53UintPtr(v53ReceiverUID),
++	}
++	cases := []struct {
++		name                             string
++		uid, euid, suid, gid, egid, sgid uint32
++		wantErr                          bool
++	}{
++		{name: "fully-dropped", uid: v53ReceiverUID, euid: v53ReceiverUID, suid: v53ReceiverUID, gid: v53ReceiverUID, egid: v53ReceiverUID, sgid: v53ReceiverUID},
++		{name: "saved-uid-root", uid: v53ReceiverUID, euid: v53ReceiverUID, suid: 0, gid: v53ReceiverUID, egid: v53ReceiverUID, sgid: v53ReceiverUID, wantErr: true},
++		{name: "saved-gid-root", uid: v53ReceiverUID, euid: v53ReceiverUID, suid: v53ReceiverUID, gid: v53ReceiverUID, egid: v53ReceiverUID, sgid: 0, wantErr: true},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			err := validateV53ReceiverIdentity(tc.uid, tc.euid, tc.suid, tc.gid, tc.egid, tc.sgid, policy)
++			if tc.wantErr && err == nil {
++				t.Fatal("V53 accepted a receiver retaining a privileged saved UID/GID")
++			}
++			if !tc.wantErr && err != nil {
++				t.Fatalf("fully dropped receiver rejected: %v", err)
++			}
++		})
++	}
++}

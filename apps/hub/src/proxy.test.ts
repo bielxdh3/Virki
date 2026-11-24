@@ -55,6 +55,29 @@ test("unknown hosts are denied and the hub requires a valid Access assertion", a
   assert.equal((await evaluateProxyRequest(new NextRequest("https://hub.biel.dev.br/login", { headers: { host: "hub.biel.dev.br", "cf-access-jwt-assertion": "forged" } }), env)).status, 403);
 });
 
+test("static asset exceptions do not bypass the session gate for extension-shaped private routes", async () => {
+  const portalHeaders = { host: "portal.biel.dev.br" };
+  for (const assetPath of ["/hub-mark.svg", "/icon.svg"]) {
+    const asset = await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${assetPath}`, { headers: portalHeaders }), env);
+    assert.equal(asset.status, 200, `shipped public branding asset stays available: ${assetPath}`);
+    const nativeHub = await evaluateProxyRequest(new NextRequest(`https://hub.biel.dev.br${assetPath}`, {
+      headers: { host: "hub.biel.dev.br" }
+    }), { ...env, NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native" });
+    assert.equal(nativeHub.status, 200, `native Hub public metadata remains reachable: ${assetPath}`);
+  }
+
+  for (const path of ["/admin/audit.txt", "/admin/private.js", "/admin/private.svg", "/admin/icon.svg", "/account/icon.svg", "/account/security.xml", "/account/export.map", "/api/private.css"]) {
+    const portal = await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: portalHeaders }), env);
+    assert.equal(portal.status, 307, `portal private route must not become public by suffix: ${path}`);
+    assert.equal(portal.headers.get("cache-control"), "no-store", path);
+
+    const hub = await evaluateProxyRequest(new NextRequest(`https://hub.biel.dev.br${path}`, {
+      headers: { host: "hub.biel.dev.br" }
+    }), { ...env, NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native" });
+    assert.equal(hub.status, 307, `native Hub private route must still require a session: ${path}`);
+  }
+});
+
 test("portal OIDC endpoints are public to clients while account surfaces still require a session", async () => {
   for (const path of ["/.well-known/openid-configuration", "/auth", "/auth/abcdefghijklmnop", "/token", "/token/revocation", "/jwks", "/me", "/session/end", "/session/end/confirm", "/session/end/success", "/interaction/abcdefghijklmnop"]) {
     assert.equal((await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: { host: "portal.biel.dev.br" } }), env)).status, 200, path);
@@ -75,6 +98,26 @@ test("password-verified backup factor selection reaches the public route without
   assert.equal(response.status, 200, "the form must reach the challenge-bound route instead of redirecting to login");
   assert.equal(response.headers.get("x-middleware-request-x-virki-audit-route"), "/api/login/factor");
   assert.equal(response.headers.get("cache-control"), "private, no-store, max-age=0, must-revalidate");
+});
+
+test("login page POSTs reject absent and cross-origin Server Action requests before Next dispatch", async () => {
+  const native = { ...env, NODE_ENV: "production", VIRKI_HUB_PERIMETER_MODE: "native" };
+  for (const host of ["hub.biel.dev.br", "portal.biel.dev.br"]) {
+    for (const path of ["/login", "/login/verify"]) {
+      for (const origin of [undefined, "https://attacker.invalid", "null"]) {
+        const headers = new Headers({ host, "next-action": "invalid-issue119-action", "content-type": "text/plain" });
+        if (origin) headers.set("origin", origin);
+        const denied = await evaluateProxyRequest(new NextRequest(`https://${host}${path}`, { method: "POST", headers, body: "[]" }), native);
+        assert.equal(denied.status, 403, `${host}${path} with ${origin ?? "missing origin"}`);
+        assert.equal(denied.headers.get("cache-control"), "no-store");
+        assert.match(denied.headers.get("content-security-policy") ?? "", /'nonce-[^']+'/u);
+      }
+      const allowed = await evaluateProxyRequest(new NextRequest(`https://${host}${path}`, {
+        method: "POST", headers: { host, origin: `https://${host}` }
+      }), native);
+      assert.equal(allowed.status, 200, `${host}${path} legitimate same-origin post must reach app`);
+    }
+  }
 });
 
 test("authenticated portal pages receive the no-store policy from the production Proxy boundary", async () => {
@@ -286,6 +329,35 @@ test("only a valid session-bound Hub proof survives the loopback internal render
 test("obsolete recovery API requires authentication while real recovery routes stay public", async () => {
   for (const path of ["/recover", "/recover/open"]) assert.equal((await evaluateProxyRequest(new NextRequest(`https://portal.biel.dev.br${path}`, { headers: { host: "portal.biel.dev.br" } }), env)).status, 200);
   assert.equal((await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/api/recover", { headers: { host: "portal.biel.dev.br" } }), env)).status, 307);
+});
+
+test("recovery POST rejects hostile Origin before Next Server Actions can return HTTP 500", async () => {
+  const productionEnv = { ...env, NODE_ENV: "production" };
+  for (const origin of ["https://attacker.invalid", "null", "https://portal.biel.dev.br.attacker.invalid", undefined]) {
+    const headers = { host: "portal.biel.dev.br", "next-action": "untrusted-action", ...(origin ? { origin } : {}) };
+    const response = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/recover", {
+      method: "POST", headers
+    }), productionEnv);
+    assert.equal(response.status, 403, `recovery Origin ${origin ?? "missing"} must reject before framework dispatch`);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.match(response.headers.get("content-security-policy") ?? "", /'nonce-[^']+'/u);
+    assert.equal(response.headers.get("access-control-allow-origin"), null);
+  }
+
+  const sameOrigin = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/recover", {
+    method: "POST", headers: { host: "portal.biel.dev.br", origin: "https://portal.biel.dev.br" }
+  }), productionEnv);
+  assert.equal(sameOrigin.status, 200, "valid POST still reaches the existing scoped CSRF guard");
+
+  const externalGet = await evaluateProxyRequest(new NextRequest("https://portal.biel.dev.br/recover", {
+    headers: { host: "portal.biel.dev.br", origin: "https://attacker.invalid" }
+  }), productionEnv);
+  assert.equal(externalGet.status, 200, "GET remains readable for recovery pages");
+
+  const unknownHost = await evaluateProxyRequest(new NextRequest("https://unknown.invalid/recover", {
+    method: "POST", headers: { host: "unknown.invalid", origin: "https://attacker.invalid" }
+  }), productionEnv);
+  assert.equal(unknownHost.status, 404, "unrecognized hosts retain the existing 404 boundary");
 });
 
 test("sensitive public authentication responses carry no-store and server-generated correlation", async () => {

@@ -1,0 +1,279 @@
+diff --git a/session/filesync/sealed_stage_tree_v23_linux_test.go b/session/filesync/sealed_stage_tree_v23_linux_test.go
+index 1294d40..b16fb16 100644
+--- a/session/filesync/sealed_stage_tree_v23_linux_test.go
++++ b/session/filesync/sealed_stage_tree_v23_linux_test.go
+@@ -7,6 +7,7 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
++	"strings"
+ 	"testing"
+ 
+ 	"github.com/stretchr/testify/require"
+@@ -220,3 +221,130 @@ func TestC1V33PublishedNewEntryNeverReportsAdmission(t *testing.T) {
+ 	_, statErr := os.Stat(filepath.Join(dest, "secret.env"))
+ 	require.NoError(t, statErr, "injected entry may be exposed transiently, so NEVER assert security GO")
+ }
++
++func TestC1V35PublishedPathSwapAfterLastContentSealNeverReportsAdmission(t *testing.T) {
++	t.Setenv("TMPDIR", "/tmp")
++	m := v15PacketManifest()
++	dest := filepath.Join(t.TempDir(), "published")
++	var invoked bool
++	err := receiveV35QuarantinedWithFinalNameProbe(dest, m,
++		func(stage string) error {
++			return os.WriteFile(filepath.Join(stage, "app.js"), []byte("SAFE"), 0600)
++		}, unix.Fsync, func() error {
++			invoked = true
++			// Same-UID peer replaces the published directory AFTER its pinned
++			// contents were verified and synced. The original stage FD still
++			// reads SAFE, while the pathname now resolves to unapproved bytes.
++			if err := os.Rename(dest, dest+"-approved-inode"); err != nil {
++				return err
++			}
++			if err := os.Mkdir(dest, 0700); err != nil {
++				return err
++			}
++			return os.WriteFile(filepath.Join(dest, "app.js"), []byte("EVIL"), 0600)
++		})
++	require.True(t, invoked, "test must reach the postseal race window")
++	var terminal *V22PublishedButUnadmittedError
++	require.ErrorAs(t, err, &terminal)
++	require.ErrorContains(t, err, "published pathname changed after final seal")
++	approved, readErr := os.ReadFile(filepath.Join(dest+"-approved-inode", "app.js"))
++	require.NoError(t, readErr)
++	require.Equal(t, []byte("SAFE"), approved)
++	unapproved, readErr := os.ReadFile(filepath.Join(dest, "app.js"))
++	require.NoError(t, readErr)
++	require.Equal(t, []byte("EVIL"), unapproved,
++		"detected postseal mutation can still expose transient wrong bytes: production NO-GO")
++}
++
++func TestC1V35PublishedSymlinkSwapAfterSealNeverReportsAdmission(t *testing.T) {
++	t.Setenv("TMPDIR", "/tmp")
++	m := v15PacketManifest()
++	dest := filepath.Join(t.TempDir(), "published")
++	err := receiveV35QuarantinedWithFinalNameProbe(dest, m,
++		func(stage string) error { return os.WriteFile(filepath.Join(stage, "app.js"), []byte("SAFE"), 0600) },
++		unix.Fsync, func() error {
++			if err := os.Rename(dest, dest+"-pinned"); err != nil {
++				return err
++			}
++			return os.Symlink(dest+"-pinned", dest)
++		})
++	var terminal *V22PublishedButUnadmittedError
++	require.ErrorAs(t, err, &terminal)
++	require.ErrorContains(t, err, "published pathname changed after final seal")
++	info, statErr := os.Lstat(dest)
++	require.NoError(t, statErr)
++	require.True(t, info.Mode()&os.ModeSymlink != 0)
++}
++
++func TestC1V35PinnedStageReceiverWritesSurviveStageNameSwap(t *testing.T) {
++	t.Setenv("TMPDIR", "/tmp")
++	m := v15PacketManifest()
++	parent := t.TempDir()
++	dest := filepath.Join(parent, "published")
++	var originalStage string
++	err := receiveV19Quarantined(dest, m, func(stage string) error {
++		items, err := os.ReadDir(parent)
++		if err != nil {
++			return err
++		}
++		for _, item := range items {
++			if strings.HasPrefix(item.Name(), ".virki-v19-") {
++				originalStage = filepath.Join(parent, item.Name())
++			}
++		}
++		if originalStage == "" {
++			return errors.New("test did not observe stage basename")
++		}
++		if err := os.Rename(originalStage, originalStage+"-pinned"); err != nil {
++			return err
++		}
++		if err := os.Mkdir(originalStage, 0700); err != nil {
++			return err
++		}
++		if err := os.WriteFile(filepath.Join(originalStage, "app.js"), []byte("EVIL"), 0600); err != nil {
++			return err
++		}
++		// Receiver writes to its FD-rooted original, not the replacement.
++		return os.WriteFile(filepath.Join(stage, "app.js"), []byte("SAFE"), 0600)
++	})
++	require.NotEmpty(t, originalStage)
++	require.ErrorContains(t, err, "no longer identifies verified directory")
++	_, statErr := os.Stat(dest)
++	require.ErrorIs(t, statErr, os.ErrNotExist, "replaced stage must never publish")
++	approved, readErr := os.ReadFile(filepath.Join(originalStage+"-pinned", "app.js"))
++	require.NoError(t, readErr)
++	require.Equal(t, []byte("SAFE"), approved)
++	attacker, readErr := os.ReadFile(filepath.Join(originalStage, "app.js"))
++	require.NoError(t, readErr)
++	require.Equal(t, []byte("EVIL"), attacker)
++}
++
++func TestC1V35ParentPathSwapAfterFsyncNeverReportsAdmission(t *testing.T) {
++	t.Setenv("TMPDIR", "/tmp")
++	m := v15PacketManifest()
++	root := t.TempDir()
++	parent := filepath.Join(root, "owner")
++	require.NoError(t, os.Mkdir(parent, 0700))
++	dest := filepath.Join(parent, "published")
++	err := receiveV23QuarantinedWithParentSync(dest, m,
++		func(stage string) error { return os.WriteFile(filepath.Join(stage, "app.js"), []byte("SAFE"), 0600) },
++		func(fd int) error {
++			// Mutable parent pathname is replaced while the publication stays
++			// pinned to the old owner directory FD.
++			if err := os.Rename(parent, parent+"-moved"); err != nil {
++				return err
++			}
++			if err := os.Mkdir(parent, 0700); err != nil {
++				return err
++			}
++			return unix.Fsync(fd)
++		})
++	var terminal *V22PublishedButUnadmittedError
++	require.ErrorAs(t, err, &terminal)
++	require.ErrorContains(t, err, "published parent pathname changed")
++	_, statErr := os.Stat(dest)
++	require.ErrorIs(t, statErr, os.ErrNotExist, "requested destination must not be falsely admitted")
++	got, readErr := os.ReadFile(filepath.Join(parent+"-moved", "published", "app.js"))
++	require.NoError(t, readErr)
++	require.Equal(t, []byte("SAFE"), got)
++}
+diff --git a/session/filesync/sealed_staging_v19_linux.go b/session/filesync/sealed_staging_v19_linux.go
+index 371f261..ea05d2d 100644
+--- a/session/filesync/sealed_staging_v19_linux.go
++++ b/session/filesync/sealed_staging_v19_linux.go
+@@ -32,6 +32,16 @@ func receiveV19Quarantined(dest string, manifest V15SealedManifest, receive func
+ // this is NOT an exported release/owner authorization or retry override.
+ func receiveV23QuarantinedWithParentSync(dest string, manifest V15SealedManifest,
+ 	receive func(string) error, syncParent func(int) error) error {
++	return receiveV35QuarantinedWithFinalNameProbe(dest, manifest, receive, syncParent, nil)
++}
++
++// V35's finalNameProbe is an internal deterministic adversarial test seam.
++// Actual receivers pass nil; it never authorizes production admission or
++// provides a callback to an external caller. The extra final identity check
++// catches a destination swap AFTER the V33 postcommit content hash, which
++// V33 previously could miss when the pinned stage FD was still intact.
++func receiveV35QuarantinedWithFinalNameProbe(dest string, manifest V15SealedManifest,
++	receive func(string) error, syncParent func(int) error, finalNameProbe func() error) error {
+ 	if receive == nil || syncParent == nil || manifest.Digest == "" || v15ManifestDigest(manifest) != manifest.Digest {
+ 		return errors.New("C1 V19 invalid isolated receive or manifest")
+ 	}
+@@ -91,22 +101,32 @@ func receiveV23QuarantinedWithParentSync(dest string, manifest V15SealedManifest
+ 	if stageName == "" {
+ 		return errors.New("C1 V19 failed to reserve unique quarantine")
+ 	}
+-	// The stable FD-backed pathname does not revisit mutable ancestor paths,
+-	// unlike filepath.Join(parent, stageName).
+-	stage := fmt.Sprintf("/proc/self/fd/%d/%s", parentFD, stageName)
+-	defer func() { _ = os.RemoveAll(stage) }()
++	// V35 pins the stage BEFORE invoking an untrusted receive callback. The
++	// earlier parentFD/stageName pathname remained swappable during transfer;
++	// here /proc/self/fd/<stageFD> keeps receiver writes on the SAME inode even
++	// if a same-UID peer changes the basename in the enclosing directory.
++	stageFD, err := unix.Openat(parentFD, stageName,
++		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return fmt.Errorf("C1 V35 cannot pin newly created stage: %w", err)
++	}
++	defer unix.Close(stageFD)
++	stage := fmt.Sprintf("/proc/self/fd/%d", stageFD)
++	// Do not recursively remove a name that no longer points to the inode we
++	// pinned. The ordinary clean-up below remains best-effort (same-UID race
++	// can still occur between its identity check and removal); on mismatch we
++	// prefer a quarantined orphan over deleting an attacker-substituted tree.
++	defer func() {
++		if requireV23StageNameIdentity(parentFD, stageFD, stageName) == nil {
++			_ = os.RemoveAll(fmt.Sprintf("/proc/self/fd/%d/%s", parentFD, stageName))
++		}
++	}()
+ 	if err := receive(stage); err != nil {
+ 		return fmt.Errorf("C1 V19 quarantined stream rejected: %w", err)
+ 	}
+ 	// V23 anchors both membership and file-content verification to the
+ 	// SAME opened stage directory FD; a path-based WalkDir before opening
+ 	// the FD could inspect an entirely different swapped quarantine tree.
+-	stageFD, err := unix.Openat(parentFD, stageName,
+-		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+-	if err != nil {
+-		return fmt.Errorf("C1 V22 cannot pin quarantined directory: %w", err)
+-	}
+-	defer unix.Close(stageFD)
+ 	if err := verifyV23StageTreeFD(stageFD, manifest); err != nil {
+ 		return fmt.Errorf("C1 V23 untrusted pinned stage membership: %w", err)
+ 	}
+@@ -126,10 +146,11 @@ func receiveV23QuarantinedWithParentSync(dest string, manifest V15SealedManifest
+ 	// Fsync a separate readable handle to the SAME pinned owner parent FD;
+ 	// the O_PATH reference alone cannot reliably be fsynced. Rename and sync
+ 	// are DEV durability diagnostics, not a crash/rollback proof of owner C4.
+-	parentSyncFD, err := unix.Openat2(rootFD, strings.TrimPrefix(parent, "/"), &unix.OpenHow{
+-		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
+-		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
+-	})
++	// V35 opens the fsync handle from the ALREADY PINNED owner directory,
++	// not by looking up mutable ancestor pathnames a second time. This avoids
++	// accidentally syncing a substitute parent chosen by a same-UID peer.
++	parentSyncFD, err := unix.Openat(parentFD, ".",
++		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+ 	if err != nil {
+ 		return fmt.Errorf("C1 V22 owner-parent fsync handle denied: %w", err)
+ 	}
+@@ -187,5 +208,55 @@ func receiveV23QuarantinedWithParentSync(dest string, manifest V15SealedManifest
+ 		return &V22PublishedButUnadmittedError{Destination: dest,
+ 			Cause: fmt.Errorf("C1 V33 published stage content changed: %w", err)}
+ 	}
++	if finalNameProbe != nil {
++		if err := finalNameProbe(); err != nil {
++			return &V22PublishedButUnadmittedError{Destination: dest,
++				Cause: fmt.Errorf("C1 V35 final name probe failed after publication: %w", err)}
++		}
++	}
++	// A pinned stage FD is not proof that the *published pathname* still
++	// identifies it. In particular, a same-UID peer can replace the final
++	// directory during a long V33 postcommit hash without changing that FD.
++	// Refuse false owner admission if the final basename now differs. Like
++	// every path-identity check this cannot forbid a rename after the check;
++	// true production isolation still requires an independent authority.
++	if err := requireV23StageNameIdentity(parentFD, stageFD, name); err != nil {
++		return &V22PublishedButUnadmittedError{Destination: dest,
++			Cause: fmt.Errorf("C1 V35 published pathname changed after final seal: %w", err)}
++	}
++	// A peer may rename the entire pinned parent directory during postcommit
++	// hashing and replace its original pathname. Confirm the *requested*
++	// path still resolves to the pinned publication directory, not just that
++	// the right basename exists in a now-orphaned FD-rooted parent.
++	if err := requireV35ParentPathIdentity(rootFD, parentFD, parent); err != nil {
++		return &V22PublishedButUnadmittedError{Destination: dest,
++			Cause: fmt.Errorf("C1 V35 published parent pathname changed: %w", err)}
++	}
++	return nil
++}
++
++func requireV35ParentPathIdentity(rootFD, pinnedParentFD int, parent string) error {
++	observedFD := rootFD
++	if parent != "/" {
++		var err error
++		observedFD, err = unix.Openat2(rootFD, strings.TrimPrefix(parent, "/"), &unix.OpenHow{
++			Flags:   uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++			Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
++		})
++		if err != nil {
++			return fmt.Errorf("C1 V35 published parent lookup failed: %w", err)
++		}
++		defer unix.Close(observedFD)
++	}
++	var published, pinned unix.Stat_t
++	if err := unix.Fstat(observedFD, &published); err != nil {
++		return err
++	}
++	if err := unix.Fstat(pinnedParentFD, &pinned); err != nil {
++		return err
++	}
++	if published.Ino != pinned.Ino || published.Dev != pinned.Dev {
++		return errors.New("C1 V35 requested parent pathname no longer identifies pinned directory")
++	}
+ 	return nil
+ }

@@ -608,6 +608,18 @@ test("authenticated E2E uses the real PostgreSQL role initializer and scoped dis
   assert.doesNotMatch(e2e, /services:\r?\n\x20+postgres:/u);
 });
 
+test("public production browser validation precedes disposable database credential creation", () => {
+  const e2e = workflow.match(/authenticated-e2e:[\s\S]*?(?=\n\x20{2}[a-z-]+:|$)/u)?.[0] ?? "";
+  const install = e2e.indexOf("- name: Install Playwright Chromium");
+  const publicGate = e2e.indexOf("- name: Verify public production 200/404 CSP and navigation in real Chromium");
+  const database = e2e.indexOf("- name: Start least-privilege disposable PostgreSQL");
+  assert.ok(install >= 0 && install < publicGate && publicGate < database,
+    "public Next build and browser validation must run before database credentials exist");
+  const gate = e2e.slice(publicGate, database);
+  assert.match(gate, /run: \|\r?\n\s+npm run build --workspace @virki\/public-site\r?\n\s+npm run test:issue119:public-browser/u);
+  assert.doesNotMatch(gate, /(?:^|\n)\s*(?:if|continue-on-error):/u);
+});
+
 test("CI and CodeQL run on stacked cdx pull requests while production builds remain main-push only", () => {
   for (const source of [workflow, codeqlWorkflow]) {
     assert.match(source, /pull_request:\r?\n\x20{4}branches:\r?\n\x20{6}- main\r?\n\x20{6}- ["']?cdx\/\*\*["']?/u);
@@ -618,8 +630,8 @@ test("CI and CodeQL run on stacked cdx pull requests while production builds rem
 
 test("CodeQL analysis stays read-only and preserves SARIF for later trusted publication", () => {
   assert.match(codeqlWorkflow, /uses: actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1/u);
-  assert.match(codeqlWorkflow, /uses: github\/codeql-action\/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4\.39\.3/u);
-  assert.match(codeqlWorkflow, /uses: github\/codeql-action\/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4\.39\.3/u);
+  assert.match(codeqlWorkflow, /uses: github\/codeql-action\/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4\.39\.4/u);
+  assert.match(codeqlWorkflow, /uses: github\/codeql-action\/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4\.39\.4/u);
   assert.doesNotMatch(codeqlWorkflow, /uses: [^\s]+@v\d/u);
   assert.match(codeqlWorkflow, /queries: security-extended/u);
   assert.match(codeqlWorkflow, /output: codeql-results[\s\S]*?upload: never/u);

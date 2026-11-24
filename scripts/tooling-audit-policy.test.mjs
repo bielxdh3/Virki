@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { evaluateToolingAudit, interpretNpmAuditResult, npmAuditArguments, summarizeToolingAuditReport, EXPECTED_TOOLING_VERSIONS, TEMPORARY_TOOLING_ADVISORY_EXCEPTION } from "./tooling-audit-policy.mjs";
@@ -114,7 +115,63 @@ test("keeps Prisma CLI, Client, Config, workspace manifests and lockfile on one 
   assert.equal(configVersion, cliVersion);
   assert.equal(lockfile.packages["node_modules/prisma"]?.version, cliVersion);
   assert.equal(lockfile.packages["node_modules/@prisma/client"]?.version, clientVersion);
-  assert.equal(lockfile.packages["node_modules/@prisma/config"]?.version, configVersion);
+  assert.equal(lockfile.packages["node_modules/@prisma/config"]?.link, true);
+  assert.equal(lockfile.packages["vendor/prisma-config-6.19.3"]?.version, configVersion);
+});
+
+test("local Prisma Config declares safe exact dependencies satisfied by the actual lockfile", () => {
+  const config = lockfile.packages["vendor/prisma-config-6.19.3"];
+  assert.ok(config, "Prisma Config must be installed and pinned");
+  assert.equal(rootPackage.overrides?.["@prisma/config"], undefined,
+    "do not override the upstream exact dependency contract");
+  for (const name of ["deepmerge-ts", "effect"]) {
+    const required = config.dependencies?.[name];
+    assert.match(required ?? "", /^\d+\.\d+\.\d+$/u, `${name} must be an exact Prisma Config dependency`);
+    const installed = lockfile.packages[`packages/database/node_modules/@prisma/config/node_modules/${name}`] ??
+      lockfile.packages[`packages/database/node_modules/${name}`] ??
+      lockfile.packages[`node_modules/${name}`];
+    assert.equal(installed?.version, required, `${name} installed version must satisfy Prisma Config`);
+  }
+});
+
+test("patched Prisma Config is a source-identical, licensed local package with fixed advisory dependencies", () => {
+  const packagePath = new URL("../vendor/prisma-config-6.19.3/package.json", import.meta.url);
+  const manifest = JSON.parse(readFileSync(packagePath, "utf8"));
+  const source = readFileSync(new URL("../vendor/prisma-config-6.19.3/dist/index.js", import.meta.url));
+  const license = readFileSync(new URL("../vendor/prisma-config-6.19.3/LICENSE", import.meta.url), "utf8");
+  assert.equal(manifest.name, "@prisma/config");
+  assert.equal(manifest.version, "6.19.3");
+  assert.equal(manifest.license, "Apache-2.0");
+  assert.match(license, /Apache License/u);
+  assert.equal(createHash("sha256").update(source).digest("hex"),
+    "92e63036b4da306abcb5fa4cfaa3a5b87508268e4f773f2b7638a061bf500a64",
+    "the vendor fork must not change upstream executed JavaScript");
+  assert.equal(manifest.dependencies?.["deepmerge-ts"], "8.0.2");
+  assert.equal(manifest.dependencies?.effect, "3.22.5");
+  assert.equal(manifest.devDependencies, undefined,
+    "local package links must not install unused upstream Vitest tooling into the security audit");
+  assert.equal(manifest.scripts, undefined,
+    "bundled, prebuilt Prisma Config must not execute or require upstream build/test scripts");
+  assert.equal(rootPackage.devDependencies?.["@prisma/config"], "file:vendor/prisma-config-6.19.3");
+  assert.equal(rootPackage.overrides?.["@prisma/config"], undefined,
+    "the safe dependency contracts must be declared, not forced through invalid overrides");
+});
+
+test("Docker build and runtime dependency stages carry the auditable local Prisma Config source", () => {
+  const dockerignore = readFileSync(new URL("../.dockerignore", import.meta.url), "utf8");
+  const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
+  assert.match(gitignore, /^!vendor\/prisma-config-6\.19\.3\/dist\/$/mu,
+    "Git must track the upstream executable source rather than silently omitting dist");
+  assert.match(gitignore, /^!vendor\/prisma-config-6\.19\.3\/dist\/\*\*$/mu);
+  assert.match(dockerignore, /^!vendor\/prisma-config-6\.19\.3\/dist\/?$/mu,
+    "the vendored source dist directory cannot be excluded from the Docker context");
+  assert.match(dockerignore, /^!vendor\/prisma-config-6\.19\.3\/dist\/\*\*$/mu);
+  for (const dockerfile of runtimeDockerfiles) {
+    for (const section of dockerfile.split(/RUN npm ci\b/u).slice(0, -1)) {
+      assert.match(section, /COPY vendor\/prisma-config-6\.19\.3\/ \.\/vendor\/prisma-config-6\.19\.3\//u,
+        "each npm ci stage must copy local Prisma Config before dependency installation");
+    }
+  }
 });
 
 test("keeps Node engines, type declarations, CI and runtime images on Node 22", () => {

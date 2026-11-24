@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -205,5 +207,151 @@ func TestV3EvidenceAndRequestBinding(t *testing.T) {
 	}
 	if fixedValue(verify.TranscriptSHA256[:]) != evidenceSHA || fixedValue(verify.ApprovalEnvelopeSHA256[:]) != hex.EncodeToString(approvalSum[:]) {
 		t.Fatal("V3_VERIFY frame does not bind evidence and approval bytes")
+	}
+}
+
+// An otherwise genuine signed C4 receipt must never satisfy a different
+// BuildKit job or a different evidence verification request.
+func TestV3SignedReceiptBoundToRequest(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptPub, receiptPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, _ := testV3ApprovalInput(t, pub)
+	raw, err := BuildV3ApprovalEnvelope(approval, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := DecodeV3ApprovalEnvelope(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := BuildV3Request(envelope, raw, CmdV3VerifyCandidate, strings.Repeat("a", 64), []byte("c1-evidence"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := V3CandidateReceipt{
+		Version: 3, Status: "CANDIDATE_VERIFIED", OwnerKeyID: "c4-receipt-test",
+		ApprovalKeyID: approval.KeyID, ApprovalID: approval.ApprovalID,
+		ApprovalSerial: approval.ApprovalSerial, ScopeToken: CString(req.ScopeToken[:]),
+		ApprovalEnvelopeSHA256: CString(req.ApprovalEnvelopeSHA256[:]),
+		EvidenceSHA256:         CString(req.TranscriptSHA256[:]), JobID: approval.JobID,
+		Role: approval.Role, Nonce: approval.Nonce, SourceCommit: approval.SourceCommit,
+		BuildPlanSHA256: approval.BuildPlanSHA256, ExecutablePolicySHA256: approval.ExecutablePolicySHA256,
+		ExporterIntentSHA256:   approval.ExporterIntentSHA256,
+		FileSyncManifestSHA256: approval.FileSyncManifestSHA256, WorkerID: approval.WorkerID,
+		OutputImageID: approval.OutputImageID, SequenceNumber: 12, Epoch: approval.Epoch,
+	}
+	for _, ctx := range approval.Contexts {
+		receipt.ContextTreeDigests = append(receipt.ContextTreeDigests, CString(ctx.TreeDigest[:]))
+		receipt.ContextStreamDigests = append(receipt.ContextStreamDigests, strings.TrimPrefix(CString(ctx.StreamDigest[:]), "sha256:"))
+		receipt.ContextStreamLengths = append(receipt.ContextStreamLengths, ctx.StreamLength)
+	}
+	makeResponse := func(t *testing.T, candidate V3CandidateReceipt) ResponseFrame {
+		t.Helper()
+		rawAck, err := json.Marshal(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var response ResponseFrame
+		copy(response.Magic[:], ProtocolMagicV3)
+		response.Version, response.Status, response.Epoch, response.SequenceNumber = ProtocolVersionV3, StatusOK, candidate.Epoch, candidate.SequenceNumber
+		if len(rawAck) > len(response.AckJSON) {
+			t.Fatal("test receipt exceeds response capacity")
+		}
+		response.AckJSONLen = uint32(len(rawAck))
+		copy(response.AckJSON[:], rawAck)
+		ackSHA := sha256.Sum256(rawAck)
+		if err := copyCString(response.CanonicalAckSHA256[:], hex.EncodeToString(ackSHA[:])); err != nil {
+			t.Fatal(err)
+		}
+		if err := copyCString(response.OwnerKeyID[:], candidate.OwnerKeyID); err != nil {
+			t.Fatal(err)
+		}
+		sig := ed25519.Sign(receiptPriv, append([]byte(ReceiptDomainV3), rawAck...))
+		if err := copyCString(response.SignatureBase64[:], base64.StdEncoding.EncodeToString(sig)); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	resp := makeResponse(t, receipt)
+	if _, err := VerifyV3CandidateReceipt(resp, receiptPub, receipt.OwnerKeyID, req); err != nil {
+		t.Fatalf("genuine candidate receipt was rejected: %v", err)
+	}
+	t.Run("owner approval key is not receipt verification key", func(t *testing.T) {
+		if _, err := VerifyV3CandidateReceipt(resp, pub, receipt.OwnerKeyID, req); err == nil || !strings.Contains(err.Error(), "signature invalid") {
+			t.Fatalf("expected independent receipt-key verification, got %v", err)
+		}
+	})
+	t.Run("different expected receipt key ID", func(t *testing.T) {
+		if _, err := VerifyV3CandidateReceipt(resp, receiptPub, "different-receipt-key", req); err == nil || !strings.Contains(err.Error(), "key ID mismatch") {
+			t.Fatalf("expected receipt key ID rejection, got %v", err)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		edit func(*V3CandidateReceipt)
+	}{
+		{"deployment authorization", func(r *V3CandidateReceipt) { r.DeployAuthorized = true }},
+		{"receipt pair admission", func(r *V3CandidateReceipt) { r.WorkerReceiptPairAdmitted = true }},
+		{"release signature", func(r *V3CandidateReceipt) { r.ReleaseSignature = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := receipt
+			tc.edit(&candidate)
+			if _, err := VerifyV3CandidateReceipt(makeResponse(t, candidate), receiptPub, receipt.OwnerKeyID, req); err == nil || !strings.Contains(err.Error(), "non-authorizing invariant") {
+				t.Fatalf("expected explicit non-authorizing invariant rejection, got %v", err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*RequestFrame)
+	}{
+		{"other job", func(r *RequestFrame) { copy(r.JobID[:], "another-job") }},
+		// Each build-identity claim must independently bind the signed C4
+		// candidate receipt to the approved source, plan and executable policy.
+		// These are defense-in-depth regressions for checks already enforced in
+		// VerifyV3CandidateReceipt, not evidence of a previously accepted swap.
+		{"other source commit", func(r *RequestFrame) { copy(r.SourceCommit[:], strings.Repeat("b", 40)) }},
+		{"other build plan", func(r *RequestFrame) { copy(r.BuildPlanSHA256[:], strings.Repeat("b", 64)) }},
+		{"other executable policy", func(r *RequestFrame) { copy(r.ExecutablePolicySHA256[:], strings.Repeat("b", 64)) }},
+		{"other worker", func(r *RequestFrame) { copy(r.SessionID[:], "other-worker") }},
+		{"other scope", func(r *RequestFrame) { copy(r.ScopeToken[:], strings.Repeat("b", 64)) }},
+		{"other evidence", func(r *RequestFrame) { copy(r.TranscriptSHA256[:], strings.Repeat("b", 64)) }},
+		{"other approval", func(r *RequestFrame) { copy(r.ApprovalEnvelopeSHA256[:], strings.Repeat("b", 64)) }},
+		{"other image", func(r *RequestFrame) { copy(r.OutputImageID[:], "sha256:"+strings.Repeat("b", 64)) }},
+		{"other tree", func(r *RequestFrame) { copy(r.ExpectedTreeDigests[0][:], "sha256:"+strings.Repeat("b", 64)) }},
+		{"other stream", func(r *RequestFrame) { copy(r.ExpectedStreamDigests[0][:], "sha256:"+strings.Repeat("b", 64)) }},
+		{"other length", func(r *RequestFrame) { r.ExpectedStreamLengths[0]++ }},
+		{"other epoch", func(r *RequestFrame) { r.Epoch++ }},
+		{"wrong command", func(r *RequestFrame) { r.Cmd = CmdV3Abort }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			other := req
+			tc.edit(&other)
+			if _, err := VerifyV3CandidateReceipt(resp, receiptPub, receipt.OwnerKeyID, other); err == nil {
+				t.Fatal("validly signed receipt was accepted for a different request")
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*ResponseFrame)
+	}{
+		{"altered frame epoch", func(r *ResponseFrame) { r.Epoch++ }},
+		{"altered frame sequence", func(r *ResponseFrame) { r.SequenceNumber++ }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			other := resp
+			tc.edit(&other)
+			if _, err := VerifyV3CandidateReceipt(other, receiptPub, receipt.OwnerKeyID, req); err == nil {
+				t.Fatal("signed receipt mismatches its response frame")
+			}
+		})
 	}
 }

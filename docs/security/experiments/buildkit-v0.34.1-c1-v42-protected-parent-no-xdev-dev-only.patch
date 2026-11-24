@@ -1,0 +1,90 @@
+diff --git a/session/filesync/sealed_publication_broker_v36_linux.go b/session/filesync/sealed_publication_broker_v36_linux.go
+index 2551597..3e1ca0b 100644
+--- a/session/filesync/sealed_publication_broker_v36_linux.go
++++ b/session/filesync/sealed_publication_broker_v36_linux.go
+@@ -76,8 +76,13 @@ func publishV38RootOwnedSnapshotWithParentSync(sourceRootFD int, expectedReceive
+ 		return fmt.Errorf("C1 V36 broker parent ancestry untrusted: %w", err)
+ 	}
+ 	parentFD, err := unix.Openat2(rootFD, strings.TrimPrefix(parent, "/"), &unix.OpenHow{
+-		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
+-		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
++		Flags: uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
++		// The protected destination must remain on the root supervisor's
++		// filesystem. A same-UID source or a changed mount namespace must not
++		// redirect our root-owned publication into a bind/FUSE/tmpfs mount.
++		// Synthetic Linux fixtures use /var/tmp, never a separate /tmp mount.
++		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS |
++			unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV,
+ 	})
+ 	if err != nil {
+ 		return fmt.Errorf("C1 V36 broker cannot pin private owner parent: %w", err)
+diff --git a/session/filesync/sealed_publication_broker_v36_linux_test.go b/session/filesync/sealed_publication_broker_v36_linux_test.go
+index 9ef0793..ecbca73 100644
+--- a/session/filesync/sealed_publication_broker_v36_linux_test.go
++++ b/session/filesync/sealed_publication_broker_v36_linux_test.go
+@@ -25,9 +25,9 @@ func TestC1V36RootBrokerCopiesIntoIndependentPublicationAuthority(t *testing.T)
+ 		t.Skip("V36 root-owned publication authority requires opt-in isolated DEV root fixture")
+ 	}
+ 	// t.TempDir() nests underneath a root-owned 0700 Go test parent that a
+-	// synthetic nonroot child cannot traverse. Use a fresh explicit /tmp path
++	// synthetic nonroot child cannot traverse. Use a fresh explicit /var/tmp path
+ 	// with a 0711 root-owned test parent, and clean only that exact temp path.
+-	base, err := os.MkdirTemp("/tmp", "virki-v36-root-broker-")
++	base, err := os.MkdirTemp("/var/tmp", "virki-v36-root-broker-")
+ 	require.NoError(t, err)
+ 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
+ 	require.NoError(t, os.Chmod(base, 0711))
+@@ -53,6 +53,27 @@ func TestC1V36RootBrokerCopiesIntoIndependentPublicationAuthority(t *testing.T)
+ 	require.Zero(t, stat.Uid)
+ 	require.Equal(t, uint32(0700), stat.Mode&0777)
+ 
++	t.Run("reject cross-mount root-owned destination before publication", func(t *testing.T) {
++		var rootStat, tmpStat unix.Stat_t
++		require.NoError(t, unix.Stat("/", &rootStat))
++		require.NoError(t, unix.Stat("/tmp", &tmpStat))
++		if rootStat.Dev == tmpStat.Dev {
++			t.Skip("/tmp shares root filesystem on this host; no cross-mount proof available")
++		}
++		mountedBase, err := os.MkdirTemp("/tmp", "virki-v42-cross-mount-")
++		require.NoError(t, err)
++		t.Cleanup(func() { require.NoError(t, os.RemoveAll(mountedBase)) })
++		require.NoError(t, os.Chmod(mountedBase, 0711))
++		mountedPrivate := filepath.Join(mountedBase, "private")
++		require.NoError(t, os.Mkdir(mountedPrivate, 0700))
++		mountedDest := filepath.Join(mountedPrivate, "must-not-publish")
++		err = publishV36RootOwnedSnapshot(sourceFD, uid, uid, mountedDest, manifest)
++		require.ErrorContains(t, err, "cannot pin private owner parent")
++		require.ErrorIs(t, err, unix.EXDEV, "root-owned bind/tmpfs crossing must be refused")
++		_, err = os.Lstat(mountedDest)
++		require.ErrorIs(t, err, os.ErrNotExist)
++	})
++
+ 	peerCommand := func(target string) *exec.Cmd {
+ 		cmd := exec.Command("/bin/sh", "-c", "printf EVIL > \"$1\"", "v36-peer", target)
+ 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
+diff --git a/session/filesync/sealed_publication_handoff_v37_linux_test.go b/session/filesync/sealed_publication_handoff_v37_linux_test.go
+index 9be1b81..43a1d34 100644
+--- a/session/filesync/sealed_publication_handoff_v37_linux_test.go
++++ b/session/filesync/sealed_publication_handoff_v37_linux_test.go
+@@ -48,7 +48,7 @@ func TestC1V37AuthenticatedUnixRightsHandoff(t *testing.T) {
+ 	if _, err := user.LookupId(uidStr); err == nil {
+ 		t.Skip("synthetic UID already in use")
+ 	}
+-	base, err := os.MkdirTemp("/tmp", "virki-v37-fd-peer-")
++	base, err := os.MkdirTemp("/var/tmp", "virki-v37-fd-peer-")
+ 	require.NoError(t, err)
+ 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
+ 	require.NoError(t, os.Chmod(base, 0711))
+diff --git a/session/filesync/sealed_publication_recovery_v38_linux_test.go b/session/filesync/sealed_publication_recovery_v38_linux_test.go
+index 9be07e2..c72e539 100644
+--- a/session/filesync/sealed_publication_recovery_v38_linux_test.go
++++ b/session/filesync/sealed_publication_recovery_v38_linux_test.go
+@@ -18,7 +18,7 @@ func TestC1V38RootBrokerAmbiguousFsyncRequiresOwnerReauthorization(t *testing.T)
+ 	if os.Getenv("VIRKI_V38_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
+ 		t.Skip("V38 ambiguous fsync requires opt-in disposable root fixture")
+ 	}
+-	base, err := os.MkdirTemp("/tmp", "virki-v38-recovery-")
++	base, err := os.MkdirTemp("/var/tmp", "virki-v38-recovery-")
+ 	require.NoError(t, err)
+ 	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
+ 	require.NoError(t, os.Chmod(base, 0711))

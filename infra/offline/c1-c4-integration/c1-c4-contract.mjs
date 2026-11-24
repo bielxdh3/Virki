@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { createHash, createPublicKey, verify } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
 
 export const OWNER_APPROVAL_DOMAIN = Buffer.from("VIRKI_C1_C4_OWNER_APPROVAL_V1\0", "utf8");
@@ -89,6 +89,115 @@ function pathsOverlap(a, b) {
   return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
 }
 
+const CONTEXT_STREAM_PREFIX = Buffer.from("virki-context-stream-v1\0", "utf8");
+const CONTEXT_TREE_PREFIX = Buffer.from("buildkit-worker-local-context-v2\0", "utf8");
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+
+// Mirror the bounded, byte-oriented C4 V3 stream/tree verification instead of
+// confusing a SHA of caller-provided arbitrary bytes with a BuildKit tree.
+// This does not attest the producer, filesystem custody or any release right.
+function verifyCanonicalContextStream(buf, name, expectedEntries, expectedTreeDigest) {
+  let at = 0;
+  const take = (count) => {
+    demand(Number.isSafeInteger(count) && count >= 0 && count <= buf.length - at,
+      `canonical context ${name} stream truncated or malformed`);
+    const part = buf.subarray(at, at + count);
+    at += count;
+    return part;
+  };
+  const uint64 = () => {
+    const value = take(8).readBigUInt64BE();
+    demand(value <= BigInt(Number.MAX_SAFE_INTEGER), `canonical context ${name} has oversized field`);
+    return Number(value);
+  };
+  const sizedBytes = () => take(uint64());
+  demand(take(CONTEXT_STREAM_PREFIX.length).equals(CONTEXT_STREAM_PREFIX),
+    `canonical context ${name} stream prefix invalid`);
+  demand(sizedBytes().equals(Buffer.from(name, "utf8")),
+    `canonical context ${name} stream name invalid`);
+
+  const tree = createHash("sha256").update(CONTEXT_TREE_PREFIX);
+  const seenPaths = new Set();
+  const activeDirectories = [];
+  let previousSegments = null;
+  let previousWasDirectory = false;
+  let entries = 0;
+  while (at < buf.length) {
+    const kind = take(1);
+    demand(kind[0] === 0x44 || kind[0] === 0x4c || kind[0] === 0x46,
+      `canonical context ${name} entry kind invalid`);
+    const pathBytes = sizedBytes();
+    // TextDecoder strips an initial UTF-8 BOM by default, silently changing
+    // the pathname whose raw bytes are bound into the C1/C4 tree hash. Reject
+    // this alias before decoding so the Node receipt and native C4 agree.
+    demand(!(pathBytes.length >= 3 && pathBytes[0] === 0xef &&
+      pathBytes[1] === 0xbb && pathBytes[2] === 0xbf),
+    `canonical context ${name} entry path has leading UTF-8 BOM`);
+    let relPath;
+    try { relPath = UTF8_DECODER.decode(pathBytes); } catch { fail(`canonical context ${name} entry path is not UTF-8`); }
+    validateRelPath(relPath, `canonical context ${name} entry path`);
+    demand(!seenPaths.has(relPath), `canonical context ${name} entry path duplicated`);
+    seenPaths.add(relPath);
+    // BuildKit's producer uses Go filepath.WalkDir: parent directories must
+    // precede their children, with depth-first traversal and byte-sorted
+    // basenames. A digest of arbitrary tagged records is not proof of a
+    // canonical FileSync context, even if its SHA-256 is self-consistent.
+    const segments = relPath.split("/");
+    const parent = segments.slice(0, -1).join("/");
+    while (activeDirectories.length > 0 && activeDirectories.at(-1) !== parent) {
+      activeDirectories.pop();
+    }
+    demand(parent === "" || activeDirectories.at(-1) === parent,
+      `canonical context ${name} parent invalid`);
+    if (previousSegments !== null) {
+      let shared = 0;
+      while (shared < segments.length && shared < previousSegments.length &&
+        segments[shared] === previousSegments[shared]) shared++;
+      if (shared === previousSegments.length) {
+        demand(previousWasDirectory && segments.length === previousSegments.length + 1,
+          `canonical context ${name} traversal invalid`);
+      } else {
+        demand(shared < segments.length &&
+          Buffer.compare(Buffer.from(previousSegments[shared], "utf8"),
+            Buffer.from(segments[shared], "utf8")) < 0,
+        `canonical context ${name} traversal invalid`);
+      }
+    }
+    if (kind[0] === 0x44) activeDirectories.push(relPath);
+    previousSegments = segments;
+    previousWasDirectory = kind[0] === 0x44;
+    const mode = uint64();
+    demand(mode <= 0o7777, `canonical context ${name} entry mode invalid`);
+    const sized = (bytes) => {
+      const length = Buffer.alloc(8);
+      length.writeBigUInt64BE(BigInt(bytes.length));
+      tree.update(length).update(bytes);
+    };
+    const rawMode = Buffer.alloc(8);
+    rawMode.writeBigUInt64BE(BigInt(mode));
+    tree.update(kind);
+    sized(pathBytes);
+    tree.update(rawMode);
+    if (kind[0] !== 0x44) {
+      const size = uint64();
+      const payload = take(size);
+      const sizeBytes = Buffer.alloc(8);
+      sizeBytes.writeBigUInt64BE(BigInt(size));
+      tree.update(sizeBytes);
+      if (kind[0] === 0x4c) {
+        demand(size > 0 && !payload.includes(0), `canonical context ${name} link invalid`);
+        tree.update(payload);
+      } else {
+        tree.update(createHash("sha256").update(payload).digest());
+      }
+    }
+    entries++;
+    demand(entries <= expectedEntries, `canonical context ${name} entryCount mismatch`);
+  }
+  demand(entries === expectedEntries, `canonical context ${name} entryCount mismatch`);
+  demand(`sha256:${tree.digest("hex")}` === expectedTreeDigest, `${name} treeDigest mismatch`);
+}
+
 /** 1. Build input & artifact provenance (C1/C4 64 MiB ceiling + 4 canonical contexts). */
 export function verifyBuildInputProvenance(contract, contextBuffers = {}) {
   demand(isPlainObject(contract), "contract must be a plain object");
@@ -120,6 +229,7 @@ export function verifyBuildInputProvenance(contract, contextBuffers = {}) {
     demand(Buffer.isBuffer(buf), `missing synthetic context bytes for ${expectedName}`);
     demand(buf.length === ctx.streamLength, `${expectedName} byte length mismatch`);
     demand(`sha256:${sha256Hex(buf)}` === ctx.streamDigest, `${expectedName} streamDigest mismatch`);
+    verifyCanonicalContextStream(buf, expectedName, ctx.entryCount, ctx.treeDigest);
   }
 }
 
@@ -254,9 +364,53 @@ function writeAllSync(fd, buf) {
   }
 }
 
+function createPendingAuthIntent(filePath, flags) {
+  // Both the initial state and every later transition require a durable
+  // intention marker before valid authorization state bytes are published.
+  // This deliberately cannot authorize or auto-reconcile a pending transition.
+  const pendingPath = `${filePath}.pending`;
+  const pendingFd = openSync(pendingPath, flags, 0o600);
+  try {
+    fsyncSync(pendingFd);
+  } finally {
+    closeSync(pendingFd);
+  }
+  fsyncParentDir(filePath);
+  return pendingPath;
+}
+
+function completePendingAuthIntent(filePath, pendingPath, flags) {
+  // The state has been fsynced and its parent synchronized, but the commit is
+  // not acknowledged until the pending intent is durably removed.
+  unlinkSync(pendingPath);
+  try {
+    fsyncParentDir(filePath);
+  } catch (error) {
+    // A failed final parent fsync is an ambiguous commit. Recreate the
+    // fail-closed fence with an independent exclusive inode and atomic rename.
+    try {
+      const restoreTmp = `${pendingPath}.restore.${randomBytes(12).toString("hex")}`;
+      const restoreFd = openSync(restoreTmp, flags, 0o600);
+      try {
+        fsyncSync(restoreFd);
+      } finally {
+        closeSync(restoreFd);
+      }
+      renameSync(restoreTmp, pendingPath);
+      fsyncParentDir(filePath);
+    } catch (restoreError) {
+      throw new AggregateError([error, restoreError],
+        "C1->C4 ambiguous final intent fsync: durable recovery fence unavailable", { cause: restoreError });
+    }
+    throw error;
+  }
+}
+
 function writeAtomicState(filePath, nextState) {
-  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  // A successful rename is not necessarily durable until the parent fsync.
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+  const pendingPath = createPendingAuthIntent(filePath, flags);
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
   const fd = openSync(tmpPath, flags, 0o600);
   try {
     const data = canonicalJsonBytes(nextState);
@@ -270,6 +424,19 @@ function writeAtomicState(filePath, nextState) {
   closeSync(fd);
   renameSync(tmpPath, filePath);
   fsyncParentDir(filePath);
+  completePendingAuthIntent(filePath, pendingPath, flags);
+}
+
+function assertNoAmbiguousStateTransition(filePath) {
+  try {
+    // lstat, not exists: a dangling symlink or other substituted marker is
+    // itself a reason to refuse, never evidence that the intent is absent.
+    lstatSync(`${filePath}.pending`);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  fail("ambiguous auth state transition pending manual reconciliation");
 }
 
 function withAuthStateLock(filePath, fn) {
@@ -311,29 +478,42 @@ function withAuthStateLock(filePath, fn) {
 /** 5 & 6. Persistent hash-chained state, recovery fencing, and anti-rollback witness. */
 export function initAnchoredAuthState(filePath, anchorSha) {
   demand(GIT_SHA.test(anchorSha ?? ""), "anchorSha must be a 40-char lowercase git SHA");
-  const initial = {
-    version: 1,
-    anchorSha,
-    currentEpoch: 1,
-    sequenceFloor: 0,
-    faulted: false,
-    headEntrySha256: anchorDigest(anchorSha),
-    entries: [],
-  };
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
-  const fd = openSync(filePath, flags, 0o600);
-  try {
-    const data = canonicalJsonBytes(initial);
-    writeAllSync(fd, data);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  fsyncParentDir(filePath);
-  return initial;
+  // Genesis must hold the same lock as readers and later writers. Otherwise
+  // a concurrent reader can accept valid JSON after the intent unlink but
+  // before the final parent fsync has durably committed that unlink.
+  return withAuthStateLock(filePath, () => {
+    const initial = {
+      version: 1,
+      anchorSha,
+      currentEpoch: 1,
+      sequenceFloor: 0,
+      faulted: false,
+      headEntrySha256: anchorDigest(anchorSha),
+      entries: [],
+    };
+    const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+    // Reserve the initial path exclusively before creating the marker. If the
+    // process crashes in this small window, the file is still empty and cannot
+    // be mistaken for initialized, verified state. A second initializer cannot
+    // overwrite a valid existing state or poison it with a fresh pending marker.
+    const fd = openSync(filePath, flags, 0o600);
+    let pendingPath;
+    try {
+      pendingPath = createPendingAuthIntent(filePath, flags);
+      const data = canonicalJsonBytes(initial);
+      writeAllSync(fd, data);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    fsyncParentDir(filePath);
+    completePendingAuthIntent(filePath, pendingPath, flags);
+    return initial;
+  });
 }
 
-export function loadAndVerifyAuthState(filePath) {
+function readAndVerifyAuthStateWithoutLock(filePath) {
+  assertNoAmbiguousStateTransition(filePath);
   const fd = openSync(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   let raw;
   try {
@@ -343,6 +523,7 @@ export function loadAndVerifyAuthState(filePath) {
   } finally {
     closeSync(fd);
   }
+  assertNoAmbiguousStateTransition(filePath);
   const state = JSON.parse(raw);
   demand(isPlainObject(state) && state.version === 1 && GIT_SHA.test(state.anchorSha ?? ""), "invalid auth state header");
   demand(typeof state.faulted === "boolean", "missing faulted flag");
@@ -391,9 +572,17 @@ export function loadAndVerifyAuthState(filePath) {
   return state;
 }
 
+export function loadAndVerifyAuthState(filePath) {
+  // Readers must serialize with writers as well: checking the pending marker
+  // twice cannot rule out a complete atomic rename + intent clear between
+  // those two checks. A stale PREPARED snapshot could otherwise survive an
+  // independently committed ABORTED transition.
+  return withAuthStateLock(filePath, () => readAndVerifyAuthStateWithoutLock(filePath));
+}
+
 export function appendAuthStateTransition(filePath, { epoch, nonce, contractSha256, status }) {
   return withAuthStateLock(filePath, () => {
-    const state = loadAndVerifyAuthState(filePath);
+    const state = readAndVerifyAuthStateWithoutLock(filePath);
     demand(!state.faulted, "auth state is faulted; mutations fenced");
     demand(epoch === state.currentEpoch, "stale or future epoch");
     demand(status === "PREPARED" || status === "ABORTED", "only non-authorizing PREPARED/ABORTED transitions permitted");
@@ -424,7 +613,7 @@ export function appendAuthStateTransition(filePath, { epoch, nonce, contractSha2
 
 export function recoverAuthStateWithEpochFence(filePath) {
   return withAuthStateLock(filePath, () => {
-    const state = loadAndVerifyAuthState(filePath);
+    const state = readAndVerifyAuthStateWithoutLock(filePath);
     demand(!state.faulted, "faulted auth state cannot be recovered without operator reconciliation");
     const nextEpoch = state.currentEpoch + 1;
     const sequence = state.sequenceFloor + 1;
@@ -497,24 +686,26 @@ export function evaluateC1ToC4IntegrationCandidate({
   const contractDigestHex = computeBoundContractDigest({ contract, output, custody });
   verifyOwnerAuthorizationEnvelope({ contractDigestHex, approval, policy });
 
-  const state = loadAndVerifyAuthState(stateFilePath);
-  demand(!state.faulted, "auth state is faulted");
-  demand(contract.epoch === state.currentEpoch, "contract epoch does not match active state epoch");
-  demand(contract.sourceCommit === state.anchorSha, "contract sourceCommit does not match state anchorSha");
-  const hasPrepared = state.entries.some((e) => e.status === "PREPARED" && e.epoch === contract.epoch && e.nonce === contract.nonce && e.contractSha256 === contractDigestHex);
-  const isAborted = state.entries.some((e) => e.status === "ABORTED" && e.epoch === contract.epoch && e.nonce === contract.nonce);
-  demand(hasPrepared && !isAborted, "contract has no active PREPARED authorization scope");
+  return withAuthStateLock(stateFilePath, () => {
+    const state = readAndVerifyAuthStateWithoutLock(stateFilePath);
+    demand(!state.faulted, "auth state is faulted");
+    demand(contract.epoch === state.currentEpoch, "contract epoch does not match active state epoch");
+    demand(contract.sourceCommit === state.anchorSha, "contract sourceCommit does not match state anchorSha");
+    const hasPrepared = state.entries.some((e) => e.status === "PREPARED" && e.epoch === contract.epoch && e.nonce === contract.nonce && e.contractSha256 === contractDigestHex);
+    const isAborted = state.entries.some((e) => e.status === "ABORTED" && e.epoch === contract.epoch && e.nonce === contract.nonce);
+    demand(hasPrepared && !isAborted, "contract has no active PREPARED authorization scope");
 
-  verifyAntiRollbackWitness(state, witness);
-  return Object.freeze({
-    status: "DEFENSIVE_VERIFIED_NON_AUTHORIZING",
-    deployAuthorized: false,
-    workerReceiptPairAdmitted: false,
-    signAckStatus: SIGN_ACK_DENIED_STATUS,
-    contractSha256: contractDigestHex,
-    fileSyncManifestSha256: manifestSha,
-    epoch: state.currentEpoch,
-    sequenceFloor: state.sequenceFloor,
-    headEntrySha256: state.headEntrySha256,
+    verifyAntiRollbackWitness(state, witness);
+    return Object.freeze({
+      status: "DEFENSIVE_VERIFIED_NON_AUTHORIZING",
+      deployAuthorized: false,
+      workerReceiptPairAdmitted: false,
+      signAckStatus: SIGN_ACK_DENIED_STATUS,
+      contractSha256: contractDigestHex,
+      fileSyncManifestSha256: manifestSha,
+      epoch: state.currentEpoch,
+      sequenceFloor: state.sequenceFloor,
+      headEntrySha256: state.headEntrySha256,
+    });
   });
 }

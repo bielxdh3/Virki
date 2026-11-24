@@ -1,0 +1,34 @@
+diff --git a/session/filesync/sealed_custody_v24_linux_test.go b/session/filesync/sealed_custody_v24_linux_test.go
+index e8354c6..384e620 100755
+--- a/session/filesync/sealed_custody_v24_linux_test.go
++++ b/session/filesync/sealed_custody_v24_linux_test.go
+@@ -87,6 +87,13 @@ func TestC1V32SameUIDPeerCannotPtraceReceiver(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatalf("INCONCLUSIVE: same-UID unprotected procfd positive control denied: %v", err)
+ 	}
++	// Linux ptrace ownership is per tracer THREAD, not per Go process. Go's
++	// scheduler is otherwise allowed to migrate this goroutine after attach,
++	// which makes a valid detach fail with ESRCH on a different OS thread.
++	// Pin attach, wait, detach and all failure cleanup to one actual TID.
++	runtime.LockOSThread()
++	defer runtime.UnlockOSThread()
++	tracerTID := unix.Gettid()
+ 	if err := unix.PtraceAttach(baseline.cmd.Process.Pid); err != nil {
+ 		t.Fatalf("INCONCLUSIVE: same-UID unprotected ptrace positive control denied by host: %v", err)
+ 	}
+@@ -97,6 +104,7 @@ func TestC1V32SameUIDPeerCannotPtraceReceiver(t *testing.T) {
+ 		t.Fatalf("INCONCLUSIVE: ptrace positive control never reached an attached stop: pid=%d status=%v error=%v", pid, status, waitErr)
+ 	}
+ 	require.NoError(t, unix.PtraceDetach(baseline.cmd.Process.Pid))
++	require.Equal(t, tracerTID, unix.Gettid(), "V34 ptrace positive control must stay on its attaching thread")
+ 	closeChild(baseline)
+ 
+ 	// A comparably launched protected receiver must now deny both operations.
+@@ -108,6 +116,7 @@ func TestC1V32SameUIDPeerCannotPtraceReceiver(t *testing.T) {
+ 	} else if !errors.Is(err, unix.EPERM) && !errors.Is(err, unix.EACCES) {
+ 		t.Fatalf("INCONCLUSIVE: protected ptrace failed for unrelated reason: %v", err)
+ 	}
++	require.Equal(t, tracerTID, unix.Gettid(), "V34 protected ptrace check must retain the same tracer thread")
+ 	_, err = os.Readlink(procFD(protected.cmd.Process.Pid))
+ 	if !errors.Is(err, unix.EPERM) && !errors.Is(err, unix.EACCES) {
+ 		t.Fatalf("V32 FAIL or INCONCLUSIVE: protected procfd denial not attributable to credentials: %v", err)

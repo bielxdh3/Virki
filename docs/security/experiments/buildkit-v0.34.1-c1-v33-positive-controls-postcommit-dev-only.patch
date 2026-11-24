@@ -1,0 +1,229 @@
+diff --git a/session/filesync/sealed_custody_v24_linux_test.go b/session/filesync/sealed_custody_v24_linux_test.go
+index d580454..e8354c6 100755
+--- a/session/filesync/sealed_custody_v24_linux_test.go
++++ b/session/filesync/sealed_custody_v24_linux_test.go
+@@ -5,6 +5,7 @@ package filesync
+ import (
+ 	"bufio"
+ 	"context"
++	"errors"
+ 	"fmt"
+ 	"io"
+ 	"os"
+@@ -22,45 +23,96 @@ import (
+ 	"golang.org/x/sys/unix"
+ )
+ 
+-// Same-UID peers may share filesystem authority, but must at least be unable
+-// to read the independent receiver's live file descriptors or change its
+-// memory through ptrace. The child test process isolates PR_SET_DUMPABLE from
+-// the main Go test runner, and tests the real Linux permission boundary.
++// V33 independently proves both the *absence* and the *presence* of ptrace
++// authority on the same host and UID. Without the positive baseline, Yama,
++// seccomp, hidepid or container LSM policy could deny every ptrace/procfd
++// attempt even when V32's PR_SET_DUMPABLE has not been enforced. Such hosts
++// are INCONCLUSIVE, never security PASS. Run non-root, with the same binary,
++// parent and security context for the two test children.
+ func TestC1V32SameUIDPeerCannotPtraceReceiver(t *testing.T) {
+-	if os.Getenv("VIRKI_V32_PTRACE_CHILD") == "1" {
+-		require.NoError(t, enforceV32NonDumpableReceiver())
++	if role := os.Getenv("VIRKI_V32_PTRACE_CHILD"); role != "" {
++		if role == "protected" {
++			require.NoError(t, enforceV32NonDumpableReceiver())
++		} else if role != "baseline" {
++			t.Fatalf("invalid V33 ptrace child mode %q", role)
++		}
++		dumpable, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
++		require.NoError(t, err)
++		if role == "protected" {
++			require.Zero(t, dumpable)
++		} else {
++			require.Equal(t, 1, dumpable, "INCONCLUSIVE: baseline child is already non-dumpable")
++		}
+ 		fmt.Fprintln(os.Stdout, "ready")
+ 		_, _ = io.Copy(io.Discard, os.Stdin)
+ 		return
+ 	}
+ 	if os.Geteuid() == 0 {
+-		t.Skip("same-UID ptrace denial must be tested as an unprivileged UID")
++		t.Fatal("INCONCLUSIVE: same-UID ptrace positive/negative controls require unprivileged UID")
+ 	}
+-	cmd := exec.Command(os.Args[0], "-test.run=^TestC1V32SameUIDPeerCannotPtraceReceiver$")
+-	cmd.Env = append(os.Environ(), "VIRKI_V32_PTRACE_CHILD=1")
+-	stdin, err := cmd.StdinPipe()
+-	require.NoError(t, err)
+-	stdout, err := cmd.StdoutPipe()
+-	require.NoError(t, err)
+-	require.NoError(t, cmd.Start())
+-	t.Cleanup(func() {
+-		_ = stdin.Close()
+-		if cmd.ProcessState == nil {
+-			_ = cmd.Process.Kill()
+-			_ = cmd.Wait()
+-		}
+-	})
+-	ready, err := bufio.NewReader(stdout).ReadString('\n')
+-	require.NoError(t, err)
+-	require.Equal(t, "ready\n", ready)
+-	if err := unix.PtraceAttach(cmd.Process.Pid); err == nil {
+-		_ = unix.PtraceDetach(cmd.Process.Pid)
+-		t.Fatal("same-UID peer attached to protected receiver")
++	type child struct {
++		cmd   *exec.Cmd
++		stdin io.WriteCloser
++	}
++	launch := func(role string) child {
++		cmd := exec.Command(os.Args[0], "-test.run=^TestC1V32SameUIDPeerCannotPtraceReceiver$")
++		cmd.Env = append(os.Environ(), "VIRKI_V32_PTRACE_CHILD="+role)
++		stdin, err := cmd.StdinPipe()
++		require.NoError(t, err)
++		stdout, err := cmd.StdoutPipe()
++		require.NoError(t, err)
++		require.NoError(t, cmd.Start())
++		t.Cleanup(func() {
++			_ = stdin.Close()
++			if cmd.ProcessState == nil {
++				_ = cmd.Process.Kill()
++				_ = cmd.Wait()
++			}
++		})
++		ready, err := bufio.NewReader(stdout).ReadString('\n')
++		require.NoError(t, err)
++		require.Equal(t, "ready\n", ready)
++		return child{cmd: cmd, stdin: stdin}
++	}
++	closeChild := func(c child) {
++		require.NoError(t, c.stdin.Close())
++		require.NoError(t, c.cmd.Wait())
++	}
++	procFD := func(pid int) string { return fmt.Sprintf("/proc/%d/fd/1", pid) }
++
++	// Positive access controls MUST pass before denial can be attributed to
++	// the V32 guard. A failed positive is an explicit non-passing result.
++	baseline := launch("baseline")
++	_, err := os.Readlink(procFD(baseline.cmd.Process.Pid))
++	if err != nil {
++		t.Fatalf("INCONCLUSIVE: same-UID unprotected procfd positive control denied: %v", err)
++	}
++	if err := unix.PtraceAttach(baseline.cmd.Process.Pid); err != nil {
++		t.Fatalf("INCONCLUSIVE: same-UID unprotected ptrace positive control denied by host: %v", err)
++	}
++	var status unix.WaitStatus
++	pid, waitErr := unix.Wait4(baseline.cmd.Process.Pid, &status, 0, nil)
++	if waitErr != nil || pid != baseline.cmd.Process.Pid || !status.Stopped() {
++		_ = unix.PtraceDetach(baseline.cmd.Process.Pid)
++		t.Fatalf("INCONCLUSIVE: ptrace positive control never reached an attached stop: pid=%d status=%v error=%v", pid, status, waitErr)
++	}
++	require.NoError(t, unix.PtraceDetach(baseline.cmd.Process.Pid))
++	closeChild(baseline)
++
++	// A comparably launched protected receiver must now deny both operations.
++	protected := launch("protected")
++	if err := unix.PtraceAttach(protected.cmd.Process.Pid); err == nil {
++		_, _ = unix.Wait4(protected.cmd.Process.Pid, &status, 0, nil)
++		_ = unix.PtraceDetach(protected.cmd.Process.Pid)
++		t.Fatal("V32 FAIL: same-UID peer attached to non-dumpable receiver")
++	} else if !errors.Is(err, unix.EPERM) && !errors.Is(err, unix.EACCES) {
++		t.Fatalf("INCONCLUSIVE: protected ptrace failed for unrelated reason: %v", err)
++	}
++	_, err = os.Readlink(procFD(protected.cmd.Process.Pid))
++	if !errors.Is(err, unix.EPERM) && !errors.Is(err, unix.EACCES) {
++		t.Fatalf("V32 FAIL or INCONCLUSIVE: protected procfd denial not attributable to credentials: %v", err)
+ 	}
+-	_, err = os.Readlink(fmt.Sprintf("/proc/%d/fd/1", cmd.Process.Pid))
+-	require.Error(t, err, "same-UID peer must not inspect receiver file descriptors")
+-	require.NoError(t, stdin.Close())
+-	require.NoError(t, cmd.Wait())
++	closeChild(protected)
+ }
+ 
+ func TestC1V24ReceiverCustodyIdentityContract(t *testing.T) {
+diff --git a/session/filesync/sealed_stage_tree_v23_linux_test.go b/session/filesync/sealed_stage_tree_v23_linux_test.go
+index 148a1a7..1294d40 100644
+--- a/session/filesync/sealed_stage_tree_v23_linux_test.go
++++ b/session/filesync/sealed_stage_tree_v23_linux_test.go
+@@ -165,3 +165,58 @@ func TestC1V23PublishedNameReplacementAfterFsyncNeverReportsAdmission(t *testing
+ 	require.Equal(t, []byte("EVIL"), unapproved,
+ 		"same-UID attack may expose wrong bytes; detector must never claim GO")
+ }
++
++func TestC1V33PublishedSameInodeFileMutationNeverReportsAdmission(t *testing.T) {
++	t.Setenv("TMPDIR", "/tmp")
++	m := v15PacketManifest()
++	dest := filepath.Join(t.TempDir(), "published")
++	var originalIno, changedIno uint64
++	err := receiveV23QuarantinedWithParentSync(dest, m, func(stage string) error {
++		return os.WriteFile(filepath.Join(stage, "app.js"), []byte("SAFE"), 0600)
++	}, func(fd int) error {
++		path := filepath.Join(dest, "app.js")
++		var before unix.Stat_t
++		if err := unix.Stat(path, &before); err != nil {
++			return err
++		}
++		originalIno = before.Ino
++		// This attacker shares the receiver's UID and changes the file AFTER
++		// rename without changing its inode or the published directory inode.
++		if err := os.WriteFile(path, []byte("EVIL"), 0600); err != nil {
++			return err
++		}
++		var after unix.Stat_t
++		if err := unix.Stat(path, &after); err != nil {
++			return err
++		}
++		changedIno = after.Ino
++		return unix.Fsync(fd)
++	})
++	require.NotZero(t, originalIno)
++	require.Equal(t, originalIno, changedIno, "the attack must preserve inode identity")
++	var terminal *V22PublishedButUnadmittedError
++	require.ErrorAs(t, err, &terminal)
++	require.ErrorContains(t, err, "published stage content changed")
++	got, readErr := os.ReadFile(filepath.Join(dest, "app.js"))
++	require.NoError(t, readErr)
++	require.Equal(t, []byte("EVIL"), got, "observed mutation shows C1/C4 production still NO-GO")
++}
++
++func TestC1V33PublishedNewEntryNeverReportsAdmission(t *testing.T) {
++	t.Setenv("TMPDIR", "/tmp")
++	m := v15PacketManifest()
++	dest := filepath.Join(t.TempDir(), "published")
++	err := receiveV23QuarantinedWithParentSync(dest, m, func(stage string) error {
++		return os.WriteFile(filepath.Join(stage, "app.js"), []byte("SAFE"), 0600)
++	}, func(fd int) error {
++		if err := os.WriteFile(filepath.Join(dest, "secret.env"), []byte("UNAPPROVED"), 0600); err != nil {
++			return err
++		}
++		return unix.Fsync(fd)
++	})
++	var terminal *V22PublishedButUnadmittedError
++	require.ErrorAs(t, err, &terminal)
++	require.ErrorContains(t, err, "published stage membership changed")
++	_, statErr := os.Stat(filepath.Join(dest, "secret.env"))
++	require.NoError(t, statErr, "injected entry may be exposed transiently, so NEVER assert security GO")
++}
+diff --git a/session/filesync/sealed_staging_v19_linux.go b/session/filesync/sealed_staging_v19_linux.go
+index 12074e0..371f261 100644
+--- a/session/filesync/sealed_staging_v19_linux.go
++++ b/session/filesync/sealed_staging_v19_linux.go
+@@ -171,5 +171,21 @@ func receiveV23QuarantinedWithParentSync(dest string, manifest V15SealedManifest
+ 		return &V22PublishedButUnadmittedError{Destination: dest,
+ 			Cause: fmt.Errorf("C1 V23 published unexpected directory inode: %w", err)}
+ 	}
++	// V33: inode identity alone cannot prove the contents stayed sealed. A
++	// malicious same-UID peer may modify an existing file IN PLACE (same inode)
++	// or inject a new entry after the pre-rename hash check, including during
++	// the parent sync seam above. Re-inventory and re-hash the SAME pinned
++	// stage FD after commit, and never grant a false successful admission.
++	// This detects observable tampering; it cannot prevent transient exposure
++	// or eliminate mutation AFTER this final verification. Production still
++	// requires an independently isolated publication authority.
++	if err := verifyV23StageTreeFD(stageFD, manifest); err != nil {
++		return &V22PublishedButUnadmittedError{Destination: dest,
++			Cause: fmt.Errorf("C1 V33 published stage membership changed: %w", err)}
++	}
++	if err := verifyAndSyncV22Stage(stageFD, manifest); err != nil {
++		return &V22PublishedButUnadmittedError{Destination: dest,
++			Cause: fmt.Errorf("C1 V33 published stage content changed: %w", err)}
++	}
+ 	return nil
+ }

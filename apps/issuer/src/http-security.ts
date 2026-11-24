@@ -100,11 +100,17 @@ export function setIssuerSensitiveResponseCachePolicy(
   pathname: string
 ): void {
   if (
-    pathname === "/auth" ||
+    // OIDC authorization, resume and logout have subpaths that may carry a
+    // provider interaction or its redirect. Protect the entire reviewed
+    // route family, not only the bare endpoint; otherwise sensitive responses
+    // depend on oidc-provider supplying its own cache policy on every branch.
+    isAuthorizationPath(pathname) ||
+    isLogoutPath(pathname) ||
+    /^\/resume\/[A-Za-z0-9_-]{8,160}$/u.test(pathname) ||
     pathname === "/token" ||
     pathname === "/token/revocation" ||
     pathname === "/me" ||
-    /^\/interaction\/[A-Za-z0-9_-]{8,80}$/u.test(pathname)
+    /^\/interaction\/[A-Za-z0-9_-]{8,160}$/u.test(pathname)
   ) {
     response.setHeader("Cache-Control", "no-store");
   }

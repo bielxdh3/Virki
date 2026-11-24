@@ -1,0 +1,260 @@
+diff --git a/session/filesync/sealed_publication_handoff_v37_linux.go b/session/filesync/sealed_publication_handoff_v37_linux.go
+new file mode 100644
+index 0000000..e66f6ef
+--- /dev/null
++++ b/session/filesync/sealed_publication_handoff_v37_linux.go
+@@ -0,0 +1,114 @@
++//go:build linux
++
++package filesync
++
++import (
++	"errors"
++	"fmt"
++	"net"
++	"os"
++	"time"
++
++	"golang.org/x/sys/unix"
++)
++
++// receiveV37AuthenticatedStageFD is a DEV-only, previously accepted Unix
++// stream handoff. The trusted broker creates/listens on a protected local
++// socket, authenticates its expected child PID/UID/GID using kernel
++// SO_PEERCRED, and accepts EXACTLY ONE SCM_RIGHTS source directory FD. The
++// trusted manifest and owner identity MUST originate independently of the
++// peer: a valid peer credential alone is not a C4 owner authorization.
++//
++// Neither this helper nor the broker is wired into a production RPC/service.
++func receiveV37AuthenticatedStageFD(conn *net.UnixConn, expectedPID int,
++	expectedUID, expectedGID uint32) (int, error) {
++	if conn == nil || os.Getuid() != 0 || os.Geteuid() != 0 || expectedPID <= 1 ||
++		expectedUID == 0 || expectedGID == 0 {
++		return -1, errors.New("C1 V37 requires root broker and pinned nonroot peer credentials")
++	}
++	getCred := func() (*unix.Ucred, error) {
++		raw, err := conn.SyscallConn()
++		if err != nil {
++			return nil, err
++		}
++		var cred *unix.Ucred
++		var inner error
++		if err := raw.Control(func(fd uintptr) {
++			cred, inner = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
++		}); err != nil {
++			return nil, err
++		}
++		return cred, inner
++	}
++	peer, err := getCred()
++	if err != nil || peer == nil || peer.Pid != int32(expectedPID) ||
++		peer.Uid != expectedUID || peer.Gid != expectedGID {
++		return -1, fmt.Errorf("C1 V37 refused untrusted peer credentials: %w", err)
++	}
++	// No unbounded client-controlled payload, descriptor count or waiting.
++	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
++		return -1, err
++	}
++	var message [2]byte
++	oob := make([]byte, unix.CmsgSpace(4*4))
++	n, oobN, flags, _, err := conn.ReadMsgUnix(message[:], oob)
++	if err != nil {
++		return -1, fmt.Errorf("C1 V37 bounded FD handoff read refused: %w", err)
++	}
++	// Parse and close all received rights even on malformed messages. The
++	// trusted broker can never retain unwanted attacker-supplied descriptors.
++	control, parseErr := unix.ParseSocketControlMessage(oob[:oobN])
++	var fds []int
++	var unexpected bool
++	for _, cmsg := range control {
++		if cmsg.Header.Level != unix.SOL_SOCKET || cmsg.Header.Type != unix.SCM_RIGHTS {
++			unexpected = true
++			continue
++		}
++		rights, rightsErr := unix.ParseUnixRights(&cmsg)
++		if rightsErr != nil {
++			unexpected = true
++			continue
++		}
++		fds = append(fds, rights...)
++	}
++	good := n == 1 && message[0] == 'V' && flags&(unix.MSG_CTRUNC|unix.MSG_TRUNC) == 0 &&
++		parseErr == nil && !unexpected && len(control) == 1 && len(fds) == 1
++	if !good {
++		for _, fd := range fds {
++			_ = unix.Close(fd)
++		}
++		return -1, errors.New("C1 V37 refused malformed, truncated or multiple-FD source handoff")
++	}
++	fd := fds[0]
++	// Rights received over SCM_RIGHTS are new descriptors in this broker;
++	// explicitly prevent accidental inheritance by future children.
++	unix.CloseOnExec(fd)
++	var st unix.Stat_t
++	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR ||
++		st.Uid != expectedUID || st.Gid != expectedGID || st.Mode&0077 != 0 {
++		_ = unix.Close(fd)
++		return -1, fmt.Errorf("C1 V37 refused non-private or foreign source descriptor: %w", err)
++	}
++	peerAfter, err := getCred()
++	if err != nil || peerAfter == nil || *peerAfter != *peer {
++		_ = unix.Close(fd)
++		return -1, fmt.Errorf("C1 V37 source peer identity changed after handoff: %w", err)
++	}
++	return fd, nil
++}
++
++// publishV37FromAuthenticatedPeer is a deliberately UNWIRED composition of
++// V37 peer verification and V36 protected copy/publication. Its destination,
++// frozen manifest, expected peer PID and policy are trusted supervisor inputs;
++// the peer supplies ONLY a source FD. No client-supplied approval is accepted.
++// This does not implement C4 signatures or crash-durable replay fencing.
++func publishV37FromAuthenticatedPeer(conn *net.UnixConn, expectedPID int,
++	expectedUID, expectedGID uint32, dest string, manifest V15SealedManifest) error {
++	fd, err := receiveV37AuthenticatedStageFD(conn, expectedPID, expectedUID, expectedGID)
++	if err != nil {
++		return err
++	}
++	defer unix.Close(fd)
++	return publishV36RootOwnedSnapshot(fd, expectedUID, expectedGID, dest, manifest)
++}
+diff --git a/session/filesync/sealed_publication_handoff_v37_linux_test.go b/session/filesync/sealed_publication_handoff_v37_linux_test.go
+new file mode 100644
+index 0000000..9be1b81
+--- /dev/null
++++ b/session/filesync/sealed_publication_handoff_v37_linux_test.go
+@@ -0,0 +1,134 @@
++//go:build linux
++
++package filesync
++
++import (
++	"io"
++	"net"
++	"os"
++	"os/exec"
++	"os/user"
++	"path/filepath"
++	"strconv"
++	"syscall"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++	"golang.org/x/sys/unix"
++)
++
++// V37 exercises only synthetic 0700 custody and local Unix-domain SCM_RIGHTS.
++// It never creates an external listener, writes a production path, performs a
++// deploy, or grants an actual C4 owner permit.
++func TestC1V37AuthenticatedUnixRightsHandoff(t *testing.T) {
++	const receiverUID uint32 = 60012
++	if os.Getenv("VIRKI_V37_CHILD") == "sender" {
++		if os.Getuid() != int(receiverUID) || os.Geteuid() != int(receiverUID) {
++			t.Fatal("V37 sender must run as independent nonroot UID")
++		}
++		src, err := os.Open(os.Getenv("VIRKI_V37_SOURCE"))
++		require.NoError(t, err)
++		defer src.Close()
++		conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: os.Getenv("VIRKI_V37_SOCKET"), Net: "unix"})
++		require.NoError(t, err)
++		defer conn.Close()
++		rights := unix.UnixRights(int(src.Fd()))
++		if os.Getenv("VIRKI_V37_TWO_FDS") == "1" {
++			rights = unix.UnixRights(int(src.Fd()), int(src.Fd()))
++		}
++		_, _, err = conn.WriteMsgUnix([]byte{'V'}, rights, nil)
++		require.NoError(t, err)
++		return
++	}
++	if os.Getenv("VIRKI_V37_RUN_ROOT_FIXTURE") != "1" || os.Getuid() != 0 || os.Geteuid() != 0 {
++		t.Skip("V37 authenticated Unix rights fixture requires explicit disposable root supervision")
++	}
++	uidStr := strconv.FormatUint(uint64(receiverUID), 10)
++	if _, err := user.LookupId(uidStr); err == nil {
++		t.Skip("synthetic UID already in use")
++	}
++	base, err := os.MkdirTemp("/tmp", "virki-v37-fd-peer-")
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, os.RemoveAll(base)) })
++	require.NoError(t, os.Chmod(base, 0711))
++	source := filepath.Join(base, "source")
++	private := filepath.Join(base, "broker")
++	require.NoError(t, os.Mkdir(source, 0700))
++	require.NoError(t, os.Chown(source, int(receiverUID), int(receiverUID)))
++	require.NoError(t, os.WriteFile(filepath.Join(source, "app.js"), []byte("SAFE"), 0600))
++	require.NoError(t, os.Chown(filepath.Join(source, "app.js"), int(receiverUID), int(receiverUID)))
++	require.NoError(t, os.Mkdir(private, 0700))
++	self, err := os.Executable()
++	require.NoError(t, err)
++	input, err := os.Open(self)
++	require.NoError(t, err)
++	defer input.Close()
++	helper := filepath.Join(base, "fixture")
++	output, err := os.OpenFile(helper, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0555)
++	require.NoError(t, err)
++	_, err = io.Copy(output, input)
++	require.NoError(t, err)
++	require.NoError(t, output.Close())
++	require.NoError(t, os.Chmod(helper, 0555))
++
++	for _, tc := range []struct {
++		name     string
++		two      bool
++		wrongPID bool
++		allow    bool
++	}{
++		{name: "authenticated-one-fd", allow: true},
++		{name: "reject-multiple-fds", two: true},
++		{name: "reject-wrong-pid", wrongPID: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			sock := filepath.Join(base, tc.name+".sock")
++			listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
++			require.NoError(t, err)
++			defer listener.Close()
++			// The parent remains root-owned and not writable by the receiver,
++			// while the socket allows only this test's known synthetic GID.
++			require.NoError(t, os.Chown(sock, 0, int(receiverUID)))
++			require.NoError(t, os.Chmod(sock, 0660))
++			cmd := exec.Command(helper, "-test.run=^TestC1V37AuthenticatedUnixRightsHandoff$")
++			cmd.Env = append(os.Environ(), "VIRKI_V37_CHILD=sender",
++				"VIRKI_V37_SOURCE="+source, "VIRKI_V37_SOCKET="+sock)
++			if tc.two {
++				cmd.Env = append(cmd.Env, "VIRKI_V37_TWO_FDS=1")
++			}
++			cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{
++				Uid: receiverUID, Gid: receiverUID, Groups: []uint32{},
++			}}
++			require.NoError(t, cmd.Start())
++			t.Cleanup(func() {
++				if cmd.ProcessState == nil {
++					_ = cmd.Process.Kill()
++					_ = cmd.Wait()
++				}
++			})
++			require.NoError(t, listener.SetDeadline(time.Now().Add(5*time.Second)))
++			conn, err := listener.AcceptUnix()
++			require.NoError(t, err)
++			defer conn.Close()
++			pid := cmd.Process.Pid
++			if tc.wrongPID {
++				pid++
++			}
++			dest := filepath.Join(private, tc.name)
++			err = publishV37FromAuthenticatedPeer(conn, pid, receiverUID, receiverUID,
++				dest, v15PacketManifest())
++			if tc.allow {
++				require.NoError(t, err)
++				bytes, err := os.ReadFile(filepath.Join(dest, "app.js"))
++				require.NoError(t, err)
++				require.Equal(t, []byte("SAFE"), bytes)
++			} else {
++				require.Error(t, err)
++				_, statErr := os.Lstat(dest)
++				require.ErrorIs(t, statErr, os.ErrNotExist)
++			}
++			require.NoError(t, cmd.Wait(), "test child did not complete its FD send")
++		})
++	}
++}

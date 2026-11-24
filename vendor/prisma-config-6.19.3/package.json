@@ -1,0 +1,24 @@
+{
+    "name":  "@prisma/config",
+    "version":  "6.19.3",
+    "description":  "Internal package used to define and read Prisma configuration files",
+    "main":  "dist/index.js",
+    "types":  "dist/index.d.ts",
+    "repository":  {
+                       "type":  "git",
+                       "url":  "https://github.com/prisma/prisma.git",
+                       "directory":  "packages/config"
+                   },
+    "license":  "Apache-2.0",
+    "author":  "Alberto Schiabel \u003cschiabel@prisma.io\u003e",
+    "dependencies":  {
+                         "c12":  "3.1.0",
+                         "deepmerge-ts":  "8.0.2",
+                         "effect":  "3.22.5",
+                         "empathic":  "2.0.0"
+                     },
+    "files":  [
+                  "dist"
+              ],
+    "sideEffects":  false
+}

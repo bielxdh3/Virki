@@ -18,6 +18,8 @@ node_modules
 **/.next
 dist
 **/dist
+!vendor/prisma-config-6.19.3/dist
+!vendor/prisma-config-6.19.3/dist/**
 build
 **/build
 coverage

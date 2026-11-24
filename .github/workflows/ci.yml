@@ -65,7 +65,7 @@ jobs:
         run: node scripts/tooling-audit-policy.mjs
 
       - name: Test Prisma tooling policy
-        run: node --test scripts/tooling-audit-policy.test.mjs
+        run: node --test scripts/tooling-audit-policy.test.mjs scripts/prisma6-config-runtime-compat.test.mjs
 
   production-audit:
     name: Audit production dependency tree
@@ -115,6 +115,12 @@ jobs:
       - name: Verify issue 119 edge TLS evidence classifier (offline, no live probe)
         run: node --test scripts/security/issue119-edge-evidence.test.mjs
 
+      - name: Verify issue 119 public HTTP acceptance classifier (offline, no live probe)
+        run: node --test scripts/security/issue119-headers-evidence.test.mjs
+
+      - name: Verify issue 119 Cloudflare zone configuration acceptance (offline, no API credentials)
+        run: node --test scripts/security/issue119-cloudflare-settings.test.mjs
+
       - name: Verify issue 90 experimental patch integrity, replay and ordinary tests
         run: |
           set -euo pipefail
@@ -134,6 +140,25 @@ jobs:
             9607e2d13c28168f2f00a9370737b622b080ccc9
             c8f6df12b47ef2540bf2553ac5a9ecc9ce892971
             c8d30aca6c0df02cd49b5746d414194496fa72ff
+            fcecd3d1c3d9810bb3060310f822fcb7f6da5305
+            8f1537fd0132eeb12108a7faed4657ad019c8b41
+            a411d348f5946769f97a7c28dc169abc7b374384
+            4da0f43bfcdad770f4a1bf5786ec6df79f6f4a97
+            ba02b937798adb90eed08d17196f9aca91b13721
+            fcaf997a3f72c64904a04fd5c240db44773f0b13
+            86064bbbfdd3c6ebd9dfc6afc3bcd61938bfa10d
+            0acbf322c771b6c00a2803438fda77ac82c81a40
+            50d92e619251b1b4a889f9c6f6d7489ce2a56f6f
+            bd76aa00d4a62fa04523f4be26692de11dfb229d
+            b6231f822efcd8f0be7956c93e189a30418c51b4
+            5c732ac1f0873141eacfc88cc2f222f543fd4d6d
+            a3e5add39cd2ac188314ba4b79294a391cc7fc4c
+            7952e6dc2599b447fa97b86dda77e27416de8c7e
+            4e8440c77a86e009685717e86194bb4e6a83ff81
+            5de9120c20a35c8b0dee8a85e47973471759c315
+            d63d46e43eedca0203cf555611b27c3cf03c49d0
+            c02dad283db232bba7f02128e88697feeea6dffa
+            6d2225efbfd67865e08a726678b1a13361441eb5
           )
           i=0
           while read -r digest patch; do
@@ -158,16 +183,129 @@ jobs:
             -run '^TestC1V2(4ReceiverCustodyIdentityContract|4ReceiverCustodyParentAndGrandparentContract|4IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs|4FSSyncSealedV15EnforcesCustodyPolicy|8LauncherResourceAndIdentityRefusals|8IndependentCustodyPolicyRefusals|8AdversarialCustodyBoundaryRefusals|9SupervisorAncestorChainRejectsUntrustedPaths)$'
           "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
             -run '^TestC1V30PinnedHelperExecSurvivesAdversarialRename$'
+          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
+            -run '^TestC1V32SameUIDPeerCannotPtraceReceiver$'
+          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
+            -run '^TestC1V33Published(SameInodeFileMutation|NewEntry)NeverReportsAdmission$'
+          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
+            -run '^TestC1V35(Published.*NeverReportsAdmission|PinnedStageReceiverWritesSurviveStageNameSwap|ParentPathSwapAfterFsyncNeverReportsAdmission)$'
           setpriv --no-new-privs "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./session/filesync \
             -run '^TestC1V24IsolatedSubprocessStripsEnvAndEnforcesNoNewPrivs$'
-          # The peer runs under separate synthetic UIDs inside an isolated,
-          # root-supervised fixture. No listener, production data or deploy.
+          # Synthetic peers run under distinct identities with a disposable
+          # private Unix-domain listener for V37; no production endpoint or deploy.
           sudo env -i PATH=/usr/bin:/bin HOME=/root GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
-            VIRKI_V24_RUN_ROOT_FIXTURE=1 "$toolchain/go/bin/go" test \
-            -mod=vendor -count=1 -timeout 120s -v ./session/filesync \
-            -run '^TestC1V(24IndependentReceiverProcess|28AdversarialMultiProcessCustodyAndSwapRace|29SupervisorAncestorRejectsWritableRootPath|30RootSupervisorExecutableCustody|31PrivilegedCrossUIDLaunchRequiresTrustedHelperWithoutFlag)$' \
+            VIRKI_V24_RUN_ROOT_FIXTURE=1 VIRKI_V36_RUN_ROOT_FIXTURE=1 VIRKI_V37_RUN_ROOT_FIXTURE=1 VIRKI_V38_RUN_ROOT_FIXTURE=1 VIRKI_V39_RUN_ROOT_FIXTURE=1 VIRKI_V40_RUN_ROOT_FIXTURE=1 VIRKI_V44_RUN_ROOT_FIXTURE=1 VIRKI_V46_RUN_ROOT_FIXTURE=1 VIRKI_V47_RUN_ROOT_FIXTURE=1 VIRKI_V49_RUN_ROOT_FIXTURE=1 "$toolchain/go/bin/go" test \
+            -mod=vendor -race -count=1 -timeout 180s -v ./session/filesync \
+            -run '^TestC1V(24IndependentReceiverProcess|28AdversarialMultiProcessCustodyAndSwapRace|29SupervisorAncestorRejectsWritableRootPath|30RootSupervisorExecutableCustody|31PrivilegedCrossUIDLaunchRequiresTrustedHelperWithoutFlag|36RootBrokerCopiesIntoIndependentPublicationAuthority|37AuthenticatedUnixRightsHandoff|38RootBrokerAmbiguousFsyncRequiresOwnerReauthorization|39DurableTestPermitAndAuthenticatedPublication|40AuthenticatedLedgerDetectsValidHexTamperAndRollback|44C4SignaturesCannotAuthorizeV15TestPermit|44V40RefusesC4DomainWithoutBurningClaim|46InterprocessClaimsAndDurableIntentFence|47RecoveryObserverRejectsCrossMountBeforeInspection|47RecoveryObserverRejectsFinalBindMount|49InheritedUnixSocketCannotSpendPermit)$' \
             | tee "$RUNNER_TEMP/issue90-privileged-fixture.log"
           ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-privileged-fixture.log"
+          "$toolchain/go/bin/go" vet -mod=vendor ./session/filesync
+          # V51 is an additive POST-V50 reconciliation; all 28 historical
+          # patches, expected trees and their independent replay stay frozen.
+          bridge="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v50-to-c4-v51-dev.patch"
+          echo "c7bf1193a8f3e9d1e83d7cef3600b7a1fca118866a6fa804635bbb0eaf0600d3  $bridge" | sha256sum --check
+          git -C "$scratch" apply --cached --check "$bridge"
+          git -C "$scratch" apply --cached "$bridge"
+          test "$(git -C "$scratch" write-tree)" = b0b1507f6edd67f232728046263dda4fe8f4529e
+          git -C "$scratch" checkout-index -f --all
+          # V51R is strictly post-V51: independently pin its patch bytes and
+          # resulting tree WITHOUT altering the 28 historic patches/V51 tree.
+          v51r="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v51-to-v51r-preclaim-dev.patch"
+          echo "86825e203a417970a2895c54201e28d18498ab53613d4abb07e90a377c3c15ce  $v51r" | sha256sum --check
+          git -C "$scratch" apply --cached --check "$v51r"
+          git -C "$scratch" apply --cached "$v51r"
+          test "$(git -C "$scratch" write-tree)" = bbf1938fe2ab81f7d1ca96d52d0e382bb5154dc9
+          git -C "$scratch" checkout-index -f --all
+          # The V51/V51R tests use the REAL V50 AF_UNIX FD, durable V40 claim,
+          # root-owned V36 publication and V3 Manager, but DOES NOT sign or
+          # complete a C4 owner release. The build-tag gate is DEV-only.
+          sudo env -i PATH=/usr/bin:/bin HOME=/root GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
+            VIRKI_V51_RUN_ROOT_FIXTURE=1 "$toolchain/go/bin/go" test -mod=vendor \
+            -tags virki_c1c4_dev -race -count=1 -timeout 180s -v ./session/filesync \
+            -run '^TestC1V51(RealProtectedPublisherFeedsV3Manager|RRequiresScopeBeforeClaim|RRefusesOptionalManagerWithoutScope)$' \
+            | tee "$RUNNER_TEMP/issue90-v51-physical-bridge.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v51-physical-bridge.log"
+          "$toolchain/go/bin/go" test -mod=vendor -tags virki_c1c4_dev -race -count=1 \
+            -timeout 180s -v ./util/localcontext -run '^TestDevV51Preflight' \
+            | tee "$RUNNER_TEMP/issue90-v51r-manager-preclaim.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v51r-manager-preclaim.log"
+          # Source/local and llbsolver still contain upstream go vet
+          # lostcancel diagnostics at their original V50 tree; V51 must not
+          # rewrite unrelated upstream lifetime semantics to mask that debt.
+          "$toolchain/go/bin/go" vet -mod=vendor -tags virki_c1c4_dev ./session/filesync ./util/localcontext ./cmd/buildkitd/config ./cmd/buildkitd
+          VIRKI_C4_TEST_SOURCE_DIR="$GITHUB_WORKSPACE/infra/offline/native-owner-authority" \
+            "$toolchain/go/bin/go" test -mod=vendor -race -count=1 -timeout 180s \
+            -v ./util/localcontext -run '^TestVROAV3ServiceWithRealManagerAndNativeDaemon$' \
+            | tee "$RUNNER_TEMP/issue90-v51-native-c4.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v51-native-c4.log"
+          # V52 is now rebased as a separate additive patch AFTER both V51
+          # and the V51R preclaim security fix. Keep the earlier experimental
+          # direct-V51 V52 patch solely as historical DEV evidence.
+          four="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v51r-to-v52-four-protected-dev.patch"
+          echo "a348f5edb2eacde213932fb7b74b9ca7f478be2cd332a5b140ea7dd81d6d1104  $four" | sha256sum --check
+          git -C "$scratch" apply --cached --check "$four"
+          git -C "$scratch" apply --cached "$four"
+          test "$(git -C "$scratch" write-tree)" = 5b2a745318a884d182c0e7a06fa49b627baa4455
+          git -C "$scratch" checkout-index -f --all
+          # Four different nonroot Linux senders make independently
+          # authenticated V50 FD handoffs into four V36 root-owned snapshots;
+          # a four-process same-UID negative control must fail before claims.
+          # V52's one TEST scope cannot complete C4 and has no owner signer.
+          sudo env -i PATH=/usr/bin:/bin HOME=/root GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
+            VIRKI_V52_RUN_ROOT_FIXTURE=1 "$toolchain/go/bin/go" test \
+            -mod=vendor -tags virki_c1c4_dev -race -count=1 -timeout 180s -v \
+            ./session/filesync -run '^TestC1V52FourProtectedContextsOneSolve$' \
+            | tee "$RUNNER_TEMP/issue90-v52-four-real-publications.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v52-four-real-publications.log"
+          # This regression exists only AFTER the V52 patch. Refuse a
+          # standalone V51 nonce mismatch, but admit four DISTINCT signed
+          # V15 TEST nonces only while V52's protected group gate is pending.
+          "$toolchain/go/bin/go" test -mod=vendor -tags virki_c1c4_dev \
+            -race -count=1 -timeout 180s -v ./util/localcontext \
+            -run '^TestDevV51PreflightV52DistinctPermitNonceRequiresPendingGroup$' \
+            | tee "$RUNNER_TEMP/issue90-v52-preclaim-group-nonce-regression.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v52-preclaim-group-nonce-regression.log"
+          # V53 is strictly post-V51R and post-V52/unique UID; historical
+          # patches, V51R and V52 patch/tree receipts remain immutable. The
+          # new receiver uses actual gRPC FileSync into an FD rooted in an
+          # independent supervisor's 0700 parent. Only the V36 root broker
+          # publishes bytes, so a same-UID stage rename cannot expose them.
+          v53="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v52-to-v53-root-fd-filesync-dev.patch"
+          echo "6fadbf84f7b98d953c5fcc1696da2a600c684732058c83c57b79d3424c778f72  $v53" | sha256sum --check
+          git -C "$scratch" apply --cached --check "$v53"
+          git -C "$scratch" apply --cached "$v53"
+          test "$(git -C "$scratch" write-tree)" = c399a293604e2a55d695c5f73b89a2bbc7906e35
+          git -C "$scratch" checkout-index -f --all
+          # V54 closes a saved-credential gap in the V53 receiver policy.
+          # Real/effective UID/GID equality is insufficient: saved UID/GID 0
+          # can be restored with setuid/setgid even after capabilities are
+          # cleared and NoNewPrivs is set. Keep V53 immutable and layer V54.
+          v54="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-v53-to-v54-saved-uid-guard-dev.patch"
+          echo "273e94f1a3f18118377fd8d709f6f3088809a2358190300aedbfc91411f70a48  $v54" | sha256sum --check
+          git -C "$scratch" apply --cached --unidiff-zero --check "$v54"
+          git -C "$scratch" apply --cached --unidiff-zero "$v54"
+          test "$(git -C "$scratch" write-tree)" = 5d5ae2375e43bd1eed89e462ed184ae7466d9448
+          git -C "$scratch" checkout-index -f --all
+          "$toolchain/go/bin/go" test -mod=vendor -tags virki_c1c4_dev \
+            -race -count=1 -timeout 180s -v ./session/filesync \
+            -run '^TestC1V53LegacySameUIDCheckRenameNegativeControl$' \
+            | tee "$RUNNER_TEMP/issue90-v53-red-negative-control.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v53-red-negative-control.log"
+          grep -Fq -- '--- PASS: TestC1V53LegacySameUIDCheckRenameNegativeControl (' "$RUNNER_TEMP/issue90-v53-red-negative-control.log"
+          sudo env -i PATH=/usr/bin:/bin HOME=/root GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local \
+            VIRKI_V53_RUN_ROOT_FIXTURE=1 VIRKI_V52_RUN_ROOT_FIXTURE=1 \
+            "$toolchain/go/bin/go" test -mod=vendor -tags virki_c1c4_dev \
+            -race -count=1 -timeout 180s -v ./session/filesync \
+            -run '^TestC1V(52FourProtectedContextsOneSolve|53FileSyncToRootBrokerSameUIDStageRace|54ReceiverIdentityRejectsSavedRootUIDGID)$' \
+            | tee "$RUNNER_TEMP/issue90-v54-saved-id-and-filesync-root.log"
+          ! grep -Fq -- '--- SKIP:' "$RUNNER_TEMP/issue90-v54-saved-id-and-filesync-root.log"
+          grep -Fq -- '--- PASS: TestC1V52FourProtectedContextsOneSolve (' "$RUNNER_TEMP/issue90-v54-saved-id-and-filesync-root.log"
+          grep -Fq -- '--- PASS: TestC1V53FileSyncToRootBrokerSameUIDStageRace (' "$RUNNER_TEMP/issue90-v54-saved-id-and-filesync-root.log"
+          grep -Fq -- '--- PASS: TestC1V54ReceiverIdentityRejectsSavedRootUIDGID (' "$RUNNER_TEMP/issue90-v54-saved-id-and-filesync-root.log"
+          # The build-tag is absent in normal BuildKit. All normal packages
+          # must keep compiling with the V53 extra gate left at its zero value.
+          "$toolchain/go/bin/go" test -mod=vendor -run '^$' ./session/filesync ./util/localcontext ./source/local ./solver/llbsolver ./cmd/buildkitd/config ./cmd/buildkitd
+          "$toolchain/go/bin/go" vet -mod=vendor -tags virki_c1c4_dev ./session/filesync ./util/localcontext ./cmd/buildkitd/config ./cmd/buildkitd
 
       - name: Production control tests
         run: npm run test:production-revision
@@ -267,11 +405,25 @@ jobs:
           git -C "$scratch" apply --cached --check "$patch"
           git -C "$scratch" apply --cached "$patch"
           test "$(git -C "$scratch" write-tree)" = a8620ea2ddadbe7125168d8edef8c58cc1b4ddb1
+          # Keep the pinned original BuildKit/C4 patch immutable; the additive
+          # DEV receipt-binding patch hardens its actual VROAV3Service consumer.
+          addon="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-c4-receipt-binding-dev.patch"
+          echo "63c3823a50156a4902ff1e5bc12485a221c242f2c4f6da99d95f4954fc7e4ad5  $addon" | sha256sum --check
+          git -C "$scratch" apply --cached --check "$addon"
+          git -C "$scratch" apply --cached "$addon"
+          test "$(git -C "$scratch" write-tree)" = 056ddc9815176e137117281e2d360a9c10048296
+          # Exercise the actual BuildKit C1 physical stream producer with the
+          # isolated native C4 daemon in both DEV candidate and release-denied modes.
+          physical="$GITHUB_WORKSPACE/infra/offline/patches/buildkit-v0.34.1-c1-c4-physical-stream-dev.patch"
+          echo "9f16059ae03bac7d7345602c2a34e04ec151740433b3fe0f90cd86af50c001a6  $physical" | sha256sum --check
+          git -C "$scratch" apply --cached --check "$physical"
+          git -C "$scratch" apply --cached "$physical"
+          test "$(git -C "$scratch" write-tree)" = 8fa0196e163da1c0f40a2034a3d968ec5e1c469b
           git -C "$scratch" checkout-index --all
           export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
           export VIRKI_C4_TEST_SOURCE_DIR="$GITHUB_WORKSPACE/infra/offline/native-owner-authority"
           cd "$scratch"
-          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./util/localcontext -run '^(TestVROAV3ServiceWithRealManagerAndNativeDaemon|TestVROAV3BeginRejectsMismatchedExporterIntentBeforeNativeTransfer)$'
+          "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./util/localcontext -run '^(TestVROAV3ServiceWithRealManagerAndNativeDaemon|TestVROAV3BeginRejectsMismatchedExporterIntentBeforeNativeTransfer|TestVROAV3SignedCandidateReceiptIsBoundToExactBuildKitRequest)$'
           "$toolchain/go/bin/go" test -mod=vendor -count=1 -v ./solver/llbsolver -run '^TestLocalContext'
 
       - name: Native owner authority (C4) cross-UID/GID SO_PEERCRED tests as root
@@ -586,6 +738,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      # The public build and browser fixture need no database credentials.
+      - name: Verify public production 200/404 CSP and navigation in real Chromium
+        run: |
+          npm run build --workspace @virki/public-site
+          npm run test:issue119:public-browser
+
       - name: Start least-privilege disposable PostgreSQL
         shell: bash
         run: |
@@ -645,9 +806,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y libnss3-tools
-
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
 
       - name: Guard disposable E2E database target
         run: npx tsx scripts/e2e/global-setup.mts --validate-database
@@ -733,6 +891,9 @@ jobs:
           cleanup_url="$(cat "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE")"
           trap 'unset cleanup_url; rm -f -- "$VIRKI_E2E_AUDIT_CLEANUP_URL_FILE" || true' EXIT
           VIRKI_E2E_AUDIT_CLEANUP_DATABASE_URL="$cleanup_url" npm run test:e2e -- e2e/authenticated-journeys.spec.mts e2e/oidc-authorization-code.spec.mts
+
+      - name: Verify Hub production 200/404 CSP in real Chromium
+        run: npm run test:issue119:hub-browser
 
       - name: Remove disposable PostgreSQL
         if: always()

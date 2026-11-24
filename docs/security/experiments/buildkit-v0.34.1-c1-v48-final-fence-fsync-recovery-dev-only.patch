@@ -1,0 +1,111 @@
+diff --git a/session/filesync/sealed_publication_ledger_v40_linux.go b/session/filesync/sealed_publication_ledger_v40_linux.go
+index 6b63565..e8575da 100644
+--- a/session/filesync/sealed_publication_ledger_v40_linux.go
++++ b/session/filesync/sealed_publication_ledger_v40_linux.go
+@@ -219,10 +219,47 @@ func claimV40AuthenticatedTestPermitWithSync(ledgerDir string, m V15SealedManife
+ func claimV40AuthenticatedTestPermitWithHooks(ledgerDir string, m V15SealedManifest, p V15OwnerPermit,
+ 	pub ed25519.PublicKey, minimumEpoch, maximumEpoch uint64,
+ 	syncLog, syncCheckpoint, syncTrustParent func(int) error) error {
++	return claimV40AuthenticatedTestPermitWithFinalFenceSync(ledgerDir, m, p, pub,
++		minimumEpoch, maximumEpoch, syncLog, syncCheckpoint, syncTrustParent, unix.Fsync)
++}
++
++// Re-establish a durable MANUAL recovery fence after a recoverable failure of
++// the final intent-unlink fsync. The original log/checkpoint have already been
++// durably synced; this is not automatic admission or authorization to publish.
++// Persistent storage failure may prevent restoration, so the caller still
++// returns an error and must never claim power-loss guarantees from this hook.
++func v40RestoreTerminalIntent(trustFD int) error {
++	fd, err := unix.Openat(trustFD, v40IntentName, unix.O_WRONLY|unix.O_CREAT|
++		unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
++	if err != nil {
++		return fmt.Errorf("V40 cannot restore recovery fence after final fsync failure: %w", err)
++	}
++	if n, err := unix.Write(fd, []byte("V40_INFLIGHT\n")); err != nil || n != len("V40_INFLIGHT\n") {
++		_ = unix.Close(fd)
++		return errors.New("V40 recovery fence write failed, storage integrity indeterminate")
++	}
++	if err := unix.Fsync(fd); err != nil {
++		_ = unix.Close(fd)
++		return fmt.Errorf("V40 recovery fence file fsync failed: %w", err)
++	}
++	if err := unix.Close(fd); err != nil {
++		return fmt.Errorf("V40 recovery fence file close failed: %w", err)
++	}
++	if err := unix.Fsync(trustFD); err != nil {
++		return fmt.Errorf("V40 recovery fence parent fsync failed: %w", err)
++	}
++	return nil
++}
++
++// The last trust-parent fsync is a separate fault point from checkpoint-parent
++// fsync. The fourth hook permits testing it WITHOUT rewriting production code.
++func claimV40AuthenticatedTestPermitWithFinalFenceSync(ledgerDir string, m V15SealedManifest, p V15OwnerPermit,
++	pub ed25519.PublicKey, minimumEpoch, maximumEpoch uint64,
++	syncLog, syncCheckpoint, syncTrustParent, syncClearedFence func(int) error) error {
+ 	if os.Getuid() != 0 || os.Geteuid() != 0 || minimumEpoch == 0 ||
+ 		maximumEpoch < minimumEpoch || p.Epoch > maximumEpoch ||
+ 		len(pub) != ed25519.PublicKeySize || syncLog == nil ||
+-		syncCheckpoint == nil || syncTrustParent == nil ||
++		syncCheckpoint == nil || syncTrustParent == nil || syncClearedFence == nil ||
+ 		!filepath.IsAbs(ledgerDir) || filepath.Clean(ledgerDir) != ledgerDir ||
+ 		ledgerDir == "/" {
+ 		return errors.New("V40 requires canonical pre-provisioned trusted root ledger and valid epoch/key")
+@@ -378,8 +415,15 @@ func claimV40AuthenticatedTestPermitWithHooks(ledgerDir string, m V15SealedManif
+ 	if err := unix.Unlinkat(trustFD, v40IntentName, 0); err != nil {
+ 		return fmt.Errorf("V40 cannot clear durable transaction fence: %w", err)
+ 	}
+-	if err := unix.Fsync(trustFD); err != nil {
+-		return fmt.Errorf("V40 transaction fence clearing fsync failed: %w", err)
++	if err := syncClearedFence(trustFD); err != nil {
++		// The unlink was not durably confirmed. Recreate and fsync a terminal
++		// marker while this process still owns the exclusive ledger lock.
++		// A subsequent process must not infer a clean transaction and continue
++		// after a recoverable EIO merely because log+checkpoint match.
++		if fenceErr := v40RestoreTerminalIntent(trustFD); fenceErr != nil {
++			return fmt.Errorf("V40 final fsync ambiguous and recovery fence could not be restored: %w", errors.Join(err, fenceErr))
++		}
++		return fmt.Errorf("V40 final fsync ambiguous; durable manual-recovery fence restored: %w", err)
+ 	}
+ 	if err := v40NoPending(trustFD); err != nil {
+ 		return err
+diff --git a/session/filesync/sealed_publication_ledger_v40_linux_test.go b/session/filesync/sealed_publication_ledger_v40_linux_test.go
+index 597c0cc..564dab3 100644
+--- a/session/filesync/sealed_publication_ledger_v40_linux_test.go
++++ b/session/filesync/sealed_publication_ledger_v40_linux_test.go
+@@ -252,6 +252,35 @@ func TestC1V40AuthenticatedLedgerDetectsValidHexTamperAndRollback(t *testing.T)
+ 			})
+ 		}
+ 	})
++	t.Run("final fence clearing EIO restores durable refusal for a different signed permit after restart", func(t *testing.T) {
++		dir := provision("final-intent-fsync")
++		first := sign("failed-last-fsync", 7)
++		called := 0
++		err := claimV40AuthenticatedTestPermitWithFinalFenceSync(dir, manifest, first, pub,
++			7, 8, unix.Fsync, unix.Fsync, unix.Fsync, func(int) error {
++				called++
++				return unix.EIO // exactly after intent unlink, not checkpoint rename
++			})
++		require.Equal(t, 1, called, "fault injector must reach the last fsync")
++		require.ErrorContains(t, err, "durable manual-recovery fence restored")
++		marker := filepath.Join(v40TrustDir(dir), v40IntentName)
++		raw, err := os.ReadFile(marker)
++		require.NoError(t, err)
++		require.Equal(t, []byte("V40_INFLIGHT\n"), raw)
++		log, err := os.ReadFile(filepath.Join(dir, v40LogName))
++		require.NoError(t, err)
++		checkpoint, err := os.ReadFile(filepath.Join(v40TrustDir(dir), v40CheckpointName))
++		require.NoError(t, err)
++		claims, count, _, _, err := v40VerifyHistory(log, checkpoint, dir, pub, key)
++		require.NoError(t, err, "the signed log/checkpoint may be valid but must not auto-recover")
++		require.Len(t, claims, 1)
++		require.Equal(t, uint64(1), count)
++		next := sign("different-valid-permit-after-fsync-fault", 8)
++		require.ErrorContains(t, claim(dir, next), "ambiguous crash")
++		assertRestartRefused(dir, first)
++		assertRestartRefused(dir, next)
++		refusePublication(dir, next)
++	})
+ 	t.Run("fresh epoch remains live only after verified prior claim", func(t *testing.T) {
+ 		dir := provision("positive")
+ 		require.NoError(t, claim(dir, sign("first", 7)))

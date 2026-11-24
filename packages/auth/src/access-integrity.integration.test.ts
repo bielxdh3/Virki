@@ -69,3 +69,59 @@ test("repeated and concurrent grant revocation preserves the first timestamp and
   assert.equal(await prisma.oidcArtifact.count({ where: { clientIdHash: hashOidcIdentifier(f.clientId) } }), 1);
   assert.equal(await prisma.auditLog.count({ where: { actorUserId: f.actor.id, eventType: "PROJECT_ACCESS_REVOKED" } }), 1);
 });
+
+test("PostgreSQL: administrative regrant and OIDC connection-first locks cannot deadlock", {
+  ...integrationOptions, timeout: 25_000
+}, async () => {
+  const f = await fixture();
+  // Repeat grants are exposed by the ADMIN UI and update existing grants
+  // while OIDC may issue a token. The original opposite lock order was 40P01.
+  await domain.grantProjectAccess(f.actor, f.sessionId, f.userId, f.connectionId);
+  let announce!: (pid: number) => void;
+  let release!: () => void;
+  const locked = new Promise<number>((resolve) => { announce = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const issuerLockOrder = prisma.$transaction(async (tx) => {
+    const connections = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "ProjectConnection" WHERE "id" = ${f.connectionId} FOR UPDATE
+    `;
+    assert.equal(connections.length, 1);
+    const [backend] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`;
+    assert.ok(backend?.pid);
+    announce(backend.pid);
+    await gate;
+    const users = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "User" WHERE "id" = ${f.userId} FOR UPDATE
+    `;
+    assert.equal(users.length, 1);
+  }, { isolationLevel: "ReadCommitted", timeout: 15_000 });
+  try {
+    const issuerPid = await locked;
+    // Keep a rejection handler attached while the holder blocks the ADMIN
+    // connection query, so Node cannot lose the deadlock error.
+    const grantOutcome = domain.grantProjectAccess(f.actor, f.sessionId, f.userId, f.connectionId)
+      .then(() => ({ ok: true as const }), (error: unknown) => ({ ok: false as const, error }));
+    let observedWait = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const [status] = await prisma.$queryRaw<Array<{ waiting: bigint }>>`
+        SELECT COUNT(*)::bigint AS waiting FROM pg_stat_activity
+        WHERE pid <> pg_backend_pid() AND pg_blocking_pids(pid) @> ARRAY[${issuerPid}::int]
+      `;
+      if (status && Number(status.waiting) > 0) {
+        observedWait = true;
+        break;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(observedWait, "regrant must reach the overlapping physical connection lock");
+    release();
+    const [grantResult] = await Promise.all([grantOutcome, issuerLockOrder]);
+    if (!grantResult.ok) throw grantResult.error;
+    assert.equal(await prisma.userProjectGrant.count({
+      where: { userId: f.userId, connectionId: f.connectionId, revokedAt: null }
+    }), 1);
+  } finally {
+    release();
+    await issuerLockOrder.catch(() => {});
+  }
+});

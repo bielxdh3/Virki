@@ -3,6 +3,8 @@ import { request as httpRequest } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { createDisposableDockerSession } from "./lib/disposable-docker-session.mjs";
 import { isCanonicalNativeAdminRedirect } from "./lib/native-hub-login-redirect.mjs";
+import { classifyIssue119Response, extractIssue119PublicStylesheetPaths,
+  ISSUE119_HEADER_TARGETS } from "./security/issue119-headers-evidence.mjs";
 
 const image = process.env.VIRKI_RUNTIME_IMAGE?.trim();
 if (!image) throw new Error("Runtime smoke requires VIRKI_RUNTIME_IMAGE.");
@@ -105,6 +107,54 @@ try {
 
   const publicResponse = await assertStatus(`http://127.0.0.1:${publicPort}/`, 200);
   assertSecurityHeaders(publicResponse.headers);
+  const publicNotFound = await assertStatus(
+    `http://127.0.0.1:${publicPort}/__virki_issue119_not_found_20261121__`, 404);
+  assertSecurityHeaders(publicNotFound.headers);
+  // Test the actual built OCI release, not a mocked Next HTML/CSP fixture:
+  // both public 200 and custom 404 must carry executable nonce evidence,
+  // omit X-Powered-By and avoid inline CSS on the error surface.
+  for (const [target, observed] of [
+    [ISSUE119_HEADER_TARGETS[0], publicResponse],
+    [ISSUE119_HEADER_TARGETS[1], publicNotFound],
+  ]) {
+    const headers = new Headers();
+    for (const key of ["content-security-policy", "strict-transport-security",
+      "content-type", "x-powered-by"]) {
+      const value = observed.headers[key];
+      if (typeof value === "string") headers.set(key, value);
+    }
+    const receipt = classifyIssue119Response(target, {
+      status: observed.statusCode, headers, body: observed.body,
+    });
+    if (receipt.result !== "pass") {
+      throw new Error(`Production image public ${observed.statusCode} CSP/HTML receipt failed.`);
+    }
+    if (!observed.headers["content-security-policy"].split(";")
+      .some((directive) => directive.trim() === "style-src 'self'") ||
+      /<style\b/iu.test(observed.body) ||
+      /[\t\n\f\r ]style[\t\n\f\r ]*=/iu.test(observed.body)) {
+      throw new Error(`Production image public ${observed.statusCode} requires external-only CSS.`);
+    }
+    // A syntactically valid same-origin href is not proof that this exact OCI
+    // image actually serves it: fetch every validated stylesheet from the
+    // disposable container's loopback port, refusing missing/HTML/error CSS.
+    const stylesheetPaths = extractIssue119PublicStylesheetPaths(observed.body,
+      observed.headers["content-type"] ?? "");
+    if (stylesheetPaths.length === 0) throw new Error("Production image must declare a real public CSS asset.");
+    for (const cssPath of stylesheetPaths) {
+      const css = await requestOnce(`http://127.0.0.1:${publicPort}${cssPath}`, {});
+      const contentType = css.headers["content-type"];
+      if (css.statusCode !== 200 || typeof contentType !== "string" ||
+        !/^text\/css(?:[ \t]*;[ \t]*charset[ \t]*=[ \t]*[A-Za-z0-9_-]+)?$/i.test(contentType) ||
+        !css.body.trim()) {
+        throw new Error(`Production image public ${observed.statusCode} stylesheet asset is unavailable or not CSS.`);
+      }
+    }
+  }
+  if (!publicNotFound.body.includes('id="not-found-title"') ||
+    !publicNotFound.body.includes('class="public-page"')) {
+    throw new Error("Production image public 404 is not the custom styled, accessible error page.");
+  }
   const hubHealth = await assertStatus(`http://127.0.0.1:${hubPort}/api/health`, 200);
   assertSecurityHeaders(hubHealth.headers, "strict-origin");
   await assertStatus(`http://127.0.0.1:${hubPort}/admin/accounts`, 403, { host: hubHost });
@@ -163,7 +213,7 @@ if (cleanupFailure) throw cleanupFailure;
 if (smokeFailure) throw smokeFailure;
 
 console.log(JSON.stringify({ status: "passed", runtimeImage: image, http: true,
-  securityHeaders: true, oidcDiscovery: true, unauthorizedAccessRejected: true,
+  securityHeaders: true, public200And404Csp: true, oidcDiscovery: true, unauthorizedAccessRejected: true,
   nativeHubImageEntrypoints: true, nativeHubExternalAccessNotRequired: true,
   disposableResourcesRemoved: true, disposableRunId: suffix }));
 

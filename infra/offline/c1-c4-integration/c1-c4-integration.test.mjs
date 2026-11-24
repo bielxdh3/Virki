@@ -4,8 +4,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -19,6 +20,7 @@ import {
   loadAndVerifyAuthState,
   recoverAuthStateWithEpochFence,
   sha256Hex,
+  verifyBuildInputProvenance,
 } from "./c1-c4-contract.mjs";
 
 const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -29,17 +31,43 @@ const LINUX_NATIVE_SKIP = process.platform !== "linux"
     ? "Non-root Linux user required for native C4 daemon integration test"
     : false);
 
+function syntheticCanonicalContext(name, contents, entries = [
+  { kind: "F", path: "payload.txt", mode: 0o644, data: contents },
+]) {
+  const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(n)); return b; };
+  const sized = (b) => Buffer.concat([u64(b.length), b]);
+  const header = Buffer.concat([
+    Buffer.from("virki-context-stream-v1\0", "utf8"),
+    sized(Buffer.from(name, "utf8")),
+  ]);
+  const stream = [header];
+  const tree = [Buffer.from("buildkit-worker-local-context-v2\0", "utf8")];
+  for (const item of entries) {
+    const common = [Buffer.from(item.kind), sized(Buffer.from(item.path, "utf8")), u64(item.mode)];
+    stream.push(...common);
+    tree.push(...common);
+    if (item.kind !== "D") {
+      const bytes = Buffer.from(item.data ?? "", "utf8");
+      const size = u64(bytes.length);
+      stream.push(size, bytes);
+      tree.push(size, item.kind === "F" ? crypto.createHash("sha256").update(bytes).digest() : bytes);
+    }
+  }
+  return { buffer: Buffer.concat(stream), treeDigest: `sha256:${sha256Hex(Buffer.concat(tree))}`, entryCount: entries.length };
+}
+
 function buildSyntheticFixture(tmpDir, role = "runtime") {
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
   const pinSha256 = sha256Hex(publicKey.export({ type: "spki", format: "der" }));
 
-  const contextBuffers = {
-    "source": Buffer.from("SYNTHETIC_C1_SOURCE_TAR_V1\n", "utf8"),
-    "dockerfile": Buffer.from("FROM scratch\nCOPY . /\n", "utf8"),
-    "offline-npm-cacache": Buffer.from("SYNTHETIC_NPM_CACACHE_V1\n", "utf8"),
-    "offline-prisma-engines": Buffer.from("SYNTHETIC_PRISMA_ENGINES_V1\n", "utf8"),
+  const canonicalContexts = {
+    "source": syntheticCanonicalContext("source", "SYNTHETIC_C1_SOURCE_TAR_V1\n"),
+    "dockerfile": syntheticCanonicalContext("dockerfile", "FROM scratch\nCOPY . /\n"),
+    "offline-npm-cacache": syntheticCanonicalContext("offline-npm-cacache", "SYNTHETIC_NPM_CACACHE_V1\n"),
+    "offline-prisma-engines": syntheticCanonicalContext("offline-prisma-engines", "SYNTHETIC_PRISMA_ENGINES_V1\n"),
   };
+  const contextBuffers = Object.fromEntries(Object.entries(canonicalContexts).map(([name, value]) => [name, value.buffer]));
 
   const fileSyncManifest = {
     ignoreSource: "root-dockerignore",
@@ -67,10 +95,10 @@ function buildSyntheticFixture(tmpDir, role = "runtime") {
     role,
     contexts: Object.entries(contextBuffers).map(([name, buf]) => ({
       name,
-      treeDigest: `sha256:${sha256Hex(Buffer.from(`tree:${name}`, "utf8"))}`,
+      treeDigest: canonicalContexts[name].treeDigest,
       streamDigest: `sha256:${sha256Hex(buf)}`,
       streamLength: buf.length,
-      entryCount: 1,
+      entryCount: canonicalContexts[name].entryCount,
     })),
   };
 
@@ -163,6 +191,132 @@ test("C1->C4 integration contract accepts valid synthetic runtime and migrator c
   }
 });
 
+test("C1->C4 provenance recomputes the tree from stream bytes instead of trusting a matching stream SHA", (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-tree-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const fixture = buildSyntheticFixture(tmpDir);
+  // A matching hash of an arbitrary or modified stream is not a proof that
+  // its independent, approved BuildKit v2 tree digest describes those bytes.
+  fixture.contextBuffers.source = Buffer.from("not a BuildKit canonical context stream", "utf8");
+  fixture.contract.contexts[0].streamLength = fixture.contextBuffers.source.length;
+  fixture.contract.contexts[0].streamDigest = `sha256:${sha256Hex(fixture.contextBuffers.source)}`;
+  assert.throws(() => verifyBuildInputProvenance(fixture.contract, fixture.contextBuffers),
+    /canonical context|treeDigest mismatch/u);
+
+  const valid = buildSyntheticFixture(tmpDir);
+  verifyBuildInputProvenance(valid.contract, valid.contextBuffers);
+  const altered = Buffer.from(valid.contextBuffers.source);
+  altered[altered.length - 2] ^= 1;
+  valid.contextBuffers.source = altered;
+  valid.contract.contexts[0].streamDigest = `sha256:${sha256Hex(altered)}`;
+  assert.throws(() => verifyBuildInputProvenance(valid.contract, valid.contextBuffers),
+    /treeDigest mismatch/u,
+  "re-hashing a mutated but structurally valid stream never re-authorizes the prior tree digest");
+
+  const badCount = buildSyntheticFixture(tmpDir);
+  badCount.contract.contexts[0].entryCount = 2;
+  assert.throws(() => verifyBuildInputProvenance(badCount.contract, badCount.contextBuffers),
+    /entryCount mismatch/u, "a signed entry count must match what the bytes actually contain");
+
+  const extra = buildSyntheticFixture(tmpDir);
+  extra.contextBuffers.source = Buffer.concat([extra.contextBuffers.source, Buffer.from("F")]);
+  extra.contract.contexts[0].streamLength = extra.contextBuffers.source.length;
+  extra.contract.contexts[0].streamDigest = `sha256:${sha256Hex(extra.contextBuffers.source)}`;
+  assert.throws(() => verifyBuildInputProvenance(extra.contract, extra.contextBuffers),
+    /canonical context|entryCount mismatch/u, "trailing malformed entry bytes are never ignored");
+});
+
+test("C1->C4 accepts only Go WalkDir canonical stream traversal, including real parent directories", (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-traversal-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const validEntries = [
+    { kind: "D", path: "a", mode: 0o755 },
+    { kind: "F", path: "a/x", mode: 0o644, data: "x" },
+    { kind: "F", path: "a-b", mode: 0o644, data: "y" },
+    { kind: "L", path: "z-link", mode: 0o777, data: "a/x" },
+  ];
+  const verify = (entries) => {
+    const fx = buildSyntheticFixture(tmpDir);
+    const item = syntheticCanonicalContext("source", "", entries);
+    fx.contextBuffers.source = item.buffer;
+    fx.contract.contexts[0].streamLength = item.buffer.length;
+    fx.contract.contexts[0].streamDigest = `sha256:${sha256Hex(item.buffer)}`;
+    fx.contract.contexts[0].treeDigest = item.treeDigest;
+    fx.contract.contexts[0].entryCount = item.entryCount;
+    return verifyBuildInputProvenance(fx.contract, fx.contextBuffers);
+  };
+  verify(validEntries);
+  for (const invalidEntries of [
+    [{ kind: "F", path: "missing-parent/file", mode: 0o644, data: "x" }],
+    [validEntries[2], validEntries[0], validEntries[1], validEntries[3]],
+    [{ kind: "F", path: "a", mode: 0o644, data: "x" },
+      { kind: "F", path: "a/x", mode: 0o644, data: "y" }],
+    [{ kind: "D", path: "a", mode: 0o755 },
+      { kind: "F", path: "a/z", mode: 0o644, data: "z" },
+      { kind: "F", path: "a/b", mode: 0o644, data: "b" }],
+  ]) {
+    assert.throws(() => verify(invalidEntries), /canonical context .* (?:parent|traversal) invalid/u,
+      "self-consistent digest cannot make a structurally impossible BuildKit WalkDir stream canonical");
+  }
+});
+
+test("C1->C4 rejects leading UTF-8 BOM path aliases before Node decoding", (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-bom-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const verify = (relative) => {
+    const fx = buildSyntheticFixture(tmpDir);
+    const item = syntheticCanonicalContext("source", "", [{ kind: "F", path: relative, mode: 0o644, data: "x" }]);
+    fx.contextBuffers.source = item.buffer;
+    Object.assign(fx.contract.contexts[0], {
+      streamLength: item.buffer.length, streamDigest: `sha256:${sha256Hex(item.buffer)}`,
+      treeDigest: item.treeDigest, entryCount: item.entryCount,
+    });
+    return verifyBuildInputProvenance(fx.contract, fx.contextBuffers);
+  };
+  verify("dados-á.txt");
+  for (const relative of ["\uFEFFsafe.txt", "\uFEFF.", "\uFEFF.."]) {
+    assert.throws(() => verify(relative), /leading UTF-8 BOM|invalid.*path/u,
+      "a self-consistent stream must not alias a different pathname after TextDecoder strips a BOM");
+  }
+});
+
+test("C1->C4 Node provenance admits valid deep multibyte WalkDir paths within 512 UTF-16 units", (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-cjk-depth-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const segment = "中".repeat(70);
+  const entries = Array.from({ length: 6 }, (_, i) => ({
+    kind: i === 5 ? "F" : "D", path: Array(i + 1).fill(segment).join("/"),
+    mode: i === 5 ? 0o644 : 0o755, data: i === 5 ? "x" : undefined,
+  }));
+  const finalPath = entries[5].path;
+  assert.equal(finalPath.length, 425);
+  assert.equal(Buffer.byteLength(finalPath, "utf8"), 1265);
+  assert.ok(Buffer.byteLength(segment) < 255, "each component is filesystem-valid");
+  const fx = buildSyntheticFixture(tmpDir);
+  const item = syntheticCanonicalContext("source", "", entries);
+  fx.contextBuffers.source = item.buffer;
+  Object.assign(fx.contract.contexts[0], {
+    streamLength: item.buffer.length, streamDigest: `sha256:${sha256Hex(item.buffer)}`,
+    treeDigest: item.treeDigest, entryCount: item.entryCount,
+  });
+  verifyBuildInputProvenance(fx.contract, fx.contextBuffers);
+  const nearLimitComponents = [85, 85, 85, 85, 85, 82].map((n) => "中".repeat(n));
+  const nearLimit = nearLimitComponents.map((_, i) => ({
+    kind: i === 5 ? "F" : "D", path: nearLimitComponents.slice(0, i + 1).join("/"),
+    mode: i === 5 ? 0o644 : 0o755, data: i === 5 ? "x" : undefined,
+  }));
+  assert.equal(nearLimit.at(-1).path.length, 512);
+  assert.equal(Buffer.byteLength(nearLimit.at(-1).path, "utf8"), 1526);
+  const fxMax = buildSyntheticFixture(tmpDir);
+  const maximalItem = syntheticCanonicalContext("source", "", nearLimit);
+  fxMax.contextBuffers.source = maximalItem.buffer;
+  Object.assign(fxMax.contract.contexts[0], {
+    streamLength: maximalItem.buffer.length, streamDigest: `sha256:${sha256Hex(maximalItem.buffer)}`,
+    treeDigest: maximalItem.treeDigest, entryCount: maximalItem.entryCount,
+  });
+  verifyBuildInputProvenance(fxMax.contract, fxMax.contextBuffers);
+});
+
 test("C1->C4 state serializes independent writers and retains its Linux lock inode", { skip: process.platform !== "linux" }, async (t) => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-writers-"));
   t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
@@ -183,6 +337,99 @@ test("C1->C4 state serializes independent writers and retains its Linux lock ino
   const lockAfter = fs.statSync(`${statePath}.lock`);
   assert.equal(lockAfter.ino, lockBefore.ino);
   assert.equal(lockAfter.dev, lockBefore.dev);
+});
+
+test("C1->C4 read cannot admit a stale PREPARED scope after a concurrent ABORT commits", { skip: process.platform !== "linux" }, (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-stale-reader-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const statePath = path.join(tmpDir, "state.json");
+  const nonce = "a".repeat(32);
+  const contractSha256 = "b".repeat(64);
+  initAnchoredAuthState(statePath, "c".repeat(40));
+  appendAuthStateTransition(statePath, { epoch: 1, nonce, contractSha256, status: "PREPARED" });
+
+  // Pause exactly after the reader acquired its old state bytes and attempt an
+  // independently locked ABORT before its second pending-marker check. Without
+  // reader-side exclusion, the writer commits and the old PREPARED is accepted.
+  // With reader-side exclusion, the timed writer cannot commit before the read.
+  const originalReadFileSync = fs.readFileSync;
+  let injected = false;
+  let writerCommitted = false;
+  fs.readFileSync = function interceptedRead(target, ...args) {
+    const result = originalReadFileSync.call(fs, target, ...args);
+    if (typeof target === "number" && !injected) {
+      injected = true;
+      const script = `import { appendAuthStateTransition } from ${JSON.stringify(new URL("./c1-c4-contract.mjs", import.meta.url).href)}; appendAuthStateTransition(process.argv[1], { epoch: 1, nonce: process.argv[2], contractSha256: process.argv[3], status: "ABORTED" });`;
+      const writer = spawnSync(process.execPath, ["--input-type=module", "-e", script, statePath, nonce, contractSha256], {
+        timeout: 1500, encoding: "utf8", cwd: THIS_DIR,
+      });
+      writerCommitted = writer.status === 0;
+      if (!writerCommitted && writer.error?.code !== "ETIMEDOUT") {
+        throw new Error(`concurrent writer unexpectedly failed: ${writer.error?.message ?? writer.stderr}`);
+      }
+    }
+    return result;
+  };
+  syncBuiltinESMExports();
+  let observed;
+  try {
+    observed = loadAndVerifyAuthState(statePath);
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    syncBuiltinESMExports();
+  }
+  assert.equal(injected, true, "fixture must interleave an independent writer after reading bytes");
+  if (writerCommitted) {
+    assert.equal(observed.entries.at(-1).status, "ABORTED",
+      "read must not verify the old PREPARED state after ABORT durably commits");
+  } else {
+    assert.equal(observed.entries.at(-1).status, "PREPARED",
+      "read may report PREPARED only while the concurrent writer is blocked");
+    assert.equal(loadAndVerifyAuthState(statePath).entries.at(-1).status, "PREPARED");
+  }
+});
+
+test("C1->C4 candidate evaluation holds the authorization scope stable against concurrent ABORT", { skip: process.platform !== "linux" }, (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "virki-c1c4-eval-race-"));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const fx = buildSyntheticFixture(tmpDir);
+  const originalReadFileSync = fs.readFileSync;
+  let intercepted = false;
+  let aborted = false;
+  fs.readFileSync = function interceptedRead(target, ...args) {
+    const snapshot = originalReadFileSync.call(fs, target, ...args);
+    if (typeof target === "number" && !intercepted) {
+      intercepted = true;
+      const script = `import { appendAuthStateTransition } from ${JSON.stringify(new URL("./c1-c4-contract.mjs", import.meta.url).href)}; appendAuthStateTransition(process.argv[1], { epoch: 1, nonce: process.argv[2], contractSha256: process.argv[3], status: "ABORTED" });`;
+      const writer = spawnSync(process.execPath, ["--input-type=module", "-e", script,
+        fx.stateFilePath, fx.contract.nonce, fx.contractDigestHex], { timeout: 1500, encoding: "utf8", cwd: THIS_DIR });
+      aborted = writer.status === 0;
+      if (!aborted && writer.error?.code !== "ETIMEDOUT") {
+        throw new Error(`concurrent ABORT failed unexpectedly: ${writer.error?.message ?? writer.stderr}`);
+      }
+    }
+    return snapshot;
+  };
+  syncBuiltinESMExports();
+  let result;
+  let error;
+  try {
+    result = evaluateC1ToC4IntegrationCandidate(fx);
+  } catch (caught) {
+    error = caught;
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    syncBuiltinESMExports();
+  }
+  assert.equal(intercepted, true, "evaluation must read real persistent authorization state");
+  if (aborted) {
+    assert.match(error?.message ?? "", /no active PREPARED authorization scope/u,
+      "a committed ABORT must invalidate the candidate even during evaluation");
+  } else {
+    assert.equal(result?.status, "DEFENSIVE_VERIFIED_NON_AUTHORIZING",
+      "an evaluation may succeed only while its competing ABORT remains blocked");
+    assert.equal(loadAndVerifyAuthState(fx.stateFilePath).entries.at(-1).status, "PREPARED");
+  }
 });
 
 test("C1->C4 Linux lock bounds contention and releases on owner exit before epoch recovery", { skip: process.platform !== "linux", timeout: 20000 }, async (t) => {
@@ -211,9 +458,15 @@ test("C1->C4 Linux lock bounds contention and releases on owner exit before epoc
   assert.throws(() => recoverAuthStateWithEpochFence(statePath));
   const elapsed = performance.now() - started;
   assert.ok(elapsed >= 4500 && elapsed < 9000, `unexpected contention duration: ${elapsed} ms`);
-  assert.equal(loadAndVerifyAuthState(statePath).currentEpoch, 1);
+  const readStarted = performance.now();
+  assert.throws(() => loadAndVerifyAuthState(statePath),
+    "a reader must also refuse while another process holds the write lock");
+  const readElapsed = performance.now() - readStarted;
+  assert.ok(readElapsed >= 4500 && readElapsed < 9000,
+    `unexpected locked-reader timeout: ${readElapsed} ms`);
   assert.equal(owner.kill("SIGKILL"), true);
   assert.deepEqual(await exited, [null, "SIGKILL"]);
+  assert.equal(loadAndVerifyAuthState(statePath).currentEpoch, 1);
   assert.equal(recoverAuthStateWithEpochFence(statePath).currentEpoch, 2);
   assert.equal(loadAndVerifyAuthState(statePath).currentEpoch, 2);
   assert.equal(fs.statSync(`${statePath}.lock`).ino, inode.ino);

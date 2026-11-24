@@ -4,7 +4,7 @@ import { validateCloudflareAccessJwt } from "@virki/auth/cloudflare-access";
 import { isNativeHubPerimeterEnabled } from "./lib/hub-perimeter";
 import { writeHubAccessDenialAudit } from "./lib/access-denial-audit";
 import { createHubRenderProof, HUB_RENDER_PROVENANCE_HEADER, verifyHubRenderProof } from "./lib/hub-render-provenance";
-import { getSurface, getSurfaceBaseUrl, safeReturnTo, TRUSTED_REQUEST_PATH_HEADER } from "./lib/surface";
+import { getSurface, getSurfaceBaseUrl, hasSameOrigin, safeReturnTo, TRUSTED_REQUEST_PATH_HEADER } from "./lib/surface";
 
 const PROTECTED_CACHE_CONTROL = "private, no-store, max-age=0, must-revalidate";
 const PUBLIC_ROUTES = new Set([
@@ -27,7 +27,13 @@ const OIDC_ROOT_ROUTES = new Set([
   "/me",
   "/token/revocation",
 ]);
-const PUBLIC_FILE_PATTERN = /\.(?:ico|png|jpg|jpeg|gif|svg|webp|css|js|map|txt|xml|woff2?)$/iu;
+// Only explicitly shipped public assets bypass the session gate. A suffix-only
+// exception could turn a future /admin/report.txt or /account/export.js into
+// an unauthenticated route merely because its name resembles a static file.
+// Next App Router also serves app/icon.svg as public /icon.svg metadata.
+// Keep each exception exact: /admin/icon.svg and other extension-shaped
+// account resources must still require their normal authorization boundary.
+const PUBLIC_ASSET_PATHS = new Set(["/hub-mark.svg", "/icon.svg"]);
 
 /**
  * Per-request nonce CSP (https://nextjs.org/docs/app/guides/content-security-policy).
@@ -133,6 +139,15 @@ export async function evaluateProxyRequest(request: NextRequest, env: Readonly<R
     }
   }
 
+  // Reject malformed/cross-origin HTML POSTs before Next Server Actions can
+  // return HTTP 500. Recovery actions retain their scoped CSRF check after
+  // ingress; login-page forms submit through the separate /api/login routes.
+  if (request.method === "POST" &&
+      (pathname === "/recover" || pathname === "/login" || pathname === "/login/verify") &&
+      !hasSameOrigin(request.headers)) {
+    return withCsp(new NextResponse("Forbidden", { status: 403, headers: { "Cache-Control": "no-store" } }));
+  }
+
   if (isPublicPath(pathname, surface)) {
     const response = NextResponse.next({ request: { headers: forwardedHeaders } });
     // Issuer-proxied OIDC paths are answered by the issuer, which sets its own (single) Content-Security-Policy.
@@ -188,7 +203,7 @@ function isPublicPath(pathname: string, surface: "hub" | "portal" | "local"): bo
   if (
     PUBLIC_ROUTES.has(pathname) ||
     pathname.startsWith("/_next/") ||
-    PUBLIC_FILE_PATTERN.test(pathname)
+    PUBLIC_ASSET_PATHS.has(pathname)
   ) return true;
   if (surface !== "hub" && (pathname.startsWith("/.well-known/") || pathname.startsWith("/interaction/"))) return true;
   if (surface !== "hub" && pathname.startsWith("/resume/")) return true;
