@@ -217,6 +217,10 @@ func TestV3SignedReceiptBoundToRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	receiptPub, receiptPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	approval, _ := testV3ApprovalInput(t, pub)
 	raw, err := BuildV3ApprovalEnvelope(approval, priv)
 	if err != nil {
@@ -247,28 +251,62 @@ func TestV3SignedReceiptBoundToRequest(t *testing.T) {
 		receipt.ContextStreamDigests = append(receipt.ContextStreamDigests, strings.TrimPrefix(CString(ctx.StreamDigest[:]), "sha256:"))
 		receipt.ContextStreamLengths = append(receipt.ContextStreamLengths, ctx.StreamLength)
 	}
-	rawAck, err := json.Marshal(receipt)
-	if err != nil {
-		t.Fatal(err)
+	makeResponse := func(t *testing.T, candidate V3CandidateReceipt) ResponseFrame {
+		t.Helper()
+		rawAck, err := json.Marshal(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var response ResponseFrame
+		copy(response.Magic[:], ProtocolMagicV3)
+		response.Version, response.Status, response.Epoch, response.SequenceNumber = ProtocolVersionV3, StatusOK, candidate.Epoch, candidate.SequenceNumber
+		if len(rawAck) > len(response.AckJSON) {
+			t.Fatal("test receipt exceeds response capacity")
+		}
+		response.AckJSONLen = uint32(len(rawAck))
+		copy(response.AckJSON[:], rawAck)
+		ackSHA := sha256.Sum256(rawAck)
+		if err := copyCString(response.CanonicalAckSHA256[:], hex.EncodeToString(ackSHA[:])); err != nil {
+			t.Fatal(err)
+		}
+		if err := copyCString(response.OwnerKeyID[:], candidate.OwnerKeyID); err != nil {
+			t.Fatal(err)
+		}
+		sig := ed25519.Sign(receiptPriv, append([]byte(ReceiptDomainV3), rawAck...))
+		if err := copyCString(response.SignatureBase64[:], base64.StdEncoding.EncodeToString(sig)); err != nil {
+			t.Fatal(err)
+		}
+		return response
 	}
-	var resp ResponseFrame
-	copy(resp.Magic[:], ProtocolMagicV3)
-	resp.Version, resp.Status, resp.Epoch, resp.SequenceNumber = ProtocolVersionV3, StatusOK, receipt.Epoch, receipt.SequenceNumber
-	resp.AckJSONLen = uint32(len(rawAck))
-	copy(resp.AckJSON[:], rawAck)
-	ackSHA := sha256.Sum256(rawAck)
-	if err := copyCString(resp.CanonicalAckSHA256[:], hex.EncodeToString(ackSHA[:])); err != nil {
-		t.Fatal(err)
-	}
-	if err := copyCString(resp.OwnerKeyID[:], receipt.OwnerKeyID); err != nil {
-		t.Fatal(err)
-	}
-	sig := ed25519.Sign(priv, append([]byte(ReceiptDomainV3), rawAck...))
-	if err := copyCString(resp.SignatureBase64[:], base64.StdEncoding.EncodeToString(sig)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := VerifyV3CandidateReceipt(resp, pub, receipt.OwnerKeyID, req); err != nil {
+	resp := makeResponse(t, receipt)
+	if _, err := VerifyV3CandidateReceipt(resp, receiptPub, receipt.OwnerKeyID, req); err != nil {
 		t.Fatalf("genuine candidate receipt was rejected: %v", err)
+	}
+	t.Run("owner approval key is not receipt verification key", func(t *testing.T) {
+		if _, err := VerifyV3CandidateReceipt(resp, pub, receipt.OwnerKeyID, req); err == nil || !strings.Contains(err.Error(), "signature invalid") {
+			t.Fatalf("expected independent receipt-key verification, got %v", err)
+		}
+	})
+	t.Run("different expected receipt key ID", func(t *testing.T) {
+		if _, err := VerifyV3CandidateReceipt(resp, receiptPub, "different-receipt-key", req); err == nil || !strings.Contains(err.Error(), "key ID mismatch") {
+			t.Fatalf("expected receipt key ID rejection, got %v", err)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		edit func(*V3CandidateReceipt)
+	}{
+		{"deployment authorization", func(r *V3CandidateReceipt) { r.DeployAuthorized = true }},
+		{"receipt pair admission", func(r *V3CandidateReceipt) { r.WorkerReceiptPairAdmitted = true }},
+		{"release signature", func(r *V3CandidateReceipt) { r.ReleaseSignature = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := receipt
+			tc.edit(&candidate)
+			if _, err := VerifyV3CandidateReceipt(makeResponse(t, candidate), receiptPub, receipt.OwnerKeyID, req); err == nil || !strings.Contains(err.Error(), "non-authorizing invariant") {
+				t.Fatalf("expected explicit non-authorizing invariant rejection, got %v", err)
+			}
+		})
 	}
 	for _, tc := range []struct {
 		name string
@@ -296,7 +334,7 @@ func TestV3SignedReceiptBoundToRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			other := req
 			tc.edit(&other)
-			if _, err := VerifyV3CandidateReceipt(resp, pub, receipt.OwnerKeyID, other); err == nil {
+			if _, err := VerifyV3CandidateReceipt(resp, receiptPub, receipt.OwnerKeyID, other); err == nil {
 				t.Fatal("validly signed receipt was accepted for a different request")
 			}
 		})
@@ -311,7 +349,7 @@ func TestV3SignedReceiptBoundToRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			other := resp
 			tc.edit(&other)
-			if _, err := VerifyV3CandidateReceipt(other, pub, receipt.OwnerKeyID, req); err == nil {
+			if _, err := VerifyV3CandidateReceipt(other, receiptPub, receipt.OwnerKeyID, req); err == nil {
 				t.Fatal("signed receipt mismatches its response frame")
 			}
 		})
