@@ -19,6 +19,7 @@
     "test:oidc-node:postgres": "node scripts/oidc-node-disposable-postgres.mjs",
     "test:public-site": "tsx --test apps/public-site/src/app/public-surface.test.tsx apps/public-site/src/app/public-origin.test.ts",
     "test:issue119:hub-browser": "node --test scripts/security/issue119-hub-csp-browser.test.mjs",
+    "test:issue119:public-browser": "node --test scripts/security/issue119-public-csp-browser.test.mjs",
     "test:integration": "node scripts/integration/run.mjs",
     "test:integration:email-worker:hol": "node scripts/integration/worker-hol.mjs",
     "test:integration:email-worker:hol:local": "node scripts/integration/local-worker-hol-disposable.mjs",

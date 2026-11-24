@@ -889,6 +889,11 @@ jobs:
       - name: Verify Hub production 200/404 CSP in real Chromium
         run: npm run test:issue119:hub-browser
 
+      - name: Verify public production 200/404 CSP and navigation in real Chromium
+        run: |
+          npm run build --workspace @virki/public-site
+          npm run test:issue119:public-browser
+
       - name: Remove disposable PostgreSQL
         if: always()
         shell: bash
