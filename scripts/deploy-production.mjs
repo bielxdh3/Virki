@@ -19,6 +19,13 @@ const repositoryRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)
 const serverScriptPath = "scripts/production-server.sh";
 const secretScannerRelativePath = "scripts/secret-scan.mjs";
 const backupDirectorySentinel = "infra/backups/.gitkeep";
+// Reviewed read-only HBA probes, not database exports. Bind the exact Git blob
+// contents as well as the path; a changed query must be reviewed and re-pinned.
+const reviewedVerificationSql = new Map([
+  ["scripts/staging-local-hba-peer.sql", "dfa87f453f52131bf4fc3a60f36e658ee4541eb96b39dac13ea39960f158aa89"],
+  ["scripts/staging-remote-hba-active.sql", "9e623c50ee144ce9d93fd28759b03938108302e949819985b5393ed0593282b0"],
+  ["scripts/staging-remote-hba-rules.sql", "81c18dbb35e3a60f2319c28b2ede9101ee4a9831251008e53170af709883c123"],
+]);
 const reservedArchiveSegments = new Set([
   ".env",
   ".ghcr-read-token",
@@ -129,6 +136,7 @@ function makeArchive(revision, execute) {
       "Accepted production source tree could not be inspected.",
     );
     const sourcePaths = [];
+    const verifiedSql = new Set();
     for (const record of treeListing.split("\0").filter(Boolean)) {
       const separator = record.indexOf("\t");
       if (separator < 0) throw new ProductionRevisionError("COMMAND_FAILED");
@@ -138,6 +146,28 @@ function makeArchive(revision, execute) {
         throw new ProductionRevisionError("COMMAND_FAILED");
       }
       sourcePaths.push(entry);
+      const expectedSqlHash = reviewedVerificationSql.get(entry);
+      if (expectedSqlHash !== undefined) {
+        if (mode !== "100644" || type !== "blob" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/iu.test(objectId ?? "")) {
+          throw new ProductionRevisionError("COMMAND_FAILED", "Reviewed verification SQL has an invalid Git entry.");
+        }
+        const sizeText = requireSuccess(
+          execute("git", ["cat-file", "-s", objectId], { cwd: repositoryRoot, env: gitEnvironment }),
+          "Reviewed verification SQL size could not be inspected.",
+        );
+        const size = Number(sizeText.trim());
+        if (!Number.isSafeInteger(size) || size <= 0 || size > 16384) {
+          throw new ProductionRevisionError("COMMAND_FAILED", "Reviewed verification SQL size is invalid.");
+        }
+        const contents = requireSuccess(
+          execute("git", ["cat-file", "blob", objectId], { cwd: repositoryRoot, env: gitEnvironment }),
+          "Reviewed verification SQL could not be inspected.",
+        );
+        if (Buffer.byteLength(contents) !== size || createHash("sha256").update(contents).digest("hex") !== expectedSqlHash) {
+          throw new ProductionRevisionError("COMMAND_FAILED", "Reviewed verification SQL content does not match its pinned digest.");
+        }
+        verifiedSql.add(entry);
+      }
       if (entry.replaceAll("\\", "/").toLowerCase() === backupDirectorySentinel) {
         if (mode !== "100644" || type !== "blob" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/iu.test(objectId ?? "")) {
           throw new ProductionRevisionError("COMMAND_FAILED");
@@ -154,7 +184,7 @@ function makeArchive(revision, execute) {
         );
         if (!/^[\t\r\n ]*$/u.test(sentinelContents)) throw new ProductionRevisionError("COMMAND_FAILED");
       }
-      if (isSensitiveArchivePath(entry)) {
+      if (!verifiedSql.has(entry) && isSensitiveArchivePath(entry)) {
         throw new ProductionRevisionError("COMMAND_FAILED");
       }
     }
@@ -179,7 +209,7 @@ function makeArchive(revision, execute) {
 
     const listing = requireSuccess(execute("tar", ["-tf", archivePath]), "Production source archive could not be inspected.");
     const paths = listing.split(/\r?\n/u).filter(Boolean);
-    if (paths.some(isSensitiveArchivePath)) {
+    if (paths.some((entry) => !verifiedSql.has(entry) && isSensitiveArchivePath(entry))) {
       throw new ProductionRevisionError("COMMAND_FAILED");
     }
 
