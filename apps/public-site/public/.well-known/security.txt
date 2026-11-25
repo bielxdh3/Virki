@@ -1,0 +1,4 @@
+Contact: mailto:gabriel@biel.dev.br
+Expires: 2027-11-01T00:00:00Z
+Canonical: https://biel.dev.br/.well-known/security.txt
+Preferred-Languages: pt-BR, en
