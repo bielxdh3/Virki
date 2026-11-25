@@ -1,11 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import PublicLandingPage from "./page";
 import PublicNotFoundPage from "./not-found";
 import { buildPublicContentSecurityPolicy } from "../public-csp";
+
+test("public security.txt publishes the authorized contact and an unexpired RFC 9116 record", () => {
+  const contents = readFileSync(new URL("../../public/.well-known/security.txt", import.meta.url), "utf8");
+  const lines = contents.trimEnd().split(/\r?\n/u);
+  assert.deepEqual(lines.filter((line) => line.startsWith("Contact:")), ["Contact: mailto:gabriel@biel.dev.br"]);
+  assert.deepEqual(lines.filter((line) => line.startsWith("Canonical:")), ["Canonical: https://biel.dev.br/.well-known/security.txt"]);
+  const expires = lines.filter((line) => line.startsWith("Expires: "));
+  assert.equal(expires.length, 1);
+  const expiration = Date.parse(expires[0].slice("Expires: ".length));
+  assert.ok(Number.isFinite(expiration) && expiration > Date.now(), "Renew the authorized security contact before its expiration.");
+});
 
 test("public landing omits the portal link until an explicit URL is configured", () => {
   const previous = process.env.VIRKI_PORTAL_URL;
