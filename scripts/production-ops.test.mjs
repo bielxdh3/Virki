@@ -1277,6 +1277,56 @@ test("non-whitespace backup sentinel content blocks preflight and transfer", asy
   assert.equal(existsSync(path.dirname(archivePath)), false);
 });
 
+test("deployment admits only the exact reviewed read-only HBA query blobs", async (suite) => {
+  for (const name of ["staging-local-hba-peer.sql", "staging-remote-hba-active.sql", "staging-remote-hba-rules.sql"]) {
+    const query = readFileSync(new URL(`./${name}`, import.meta.url), "utf8").replace(/\r\n/gu, "\n");
+    for (const changed of [false, true]) {
+      await suite.test(`${name}: ${changed ? "modified content refused" : "reviewed content admitted"}`, async () => {
+        const sourcePath = `scripts/${name}`;
+        const contents = changed ? `${query}\n-- unreviewed change\n` : query;
+        let preflightCalled = false;
+        let scannerCalled = false;
+        const attempt = deployProduction({
+          action: "install",
+          config,
+          inspectSource: () => ({ branch: "main", revision }),
+          verifyCi: () => ({ ok: true, lines: [] }),
+          preflight: async () => {
+            preflightCalled = true;
+            return { status: 1, lines: ["Offline test stops before remote operations."] };
+          },
+          execute: (command, args, options = {}) => {
+            if (command === "git") assert.equal(options.env?.GIT_NO_REPLACE_OBJECTS, "1");
+            if (command === "git" && args[0] === "archive") {
+              writeFileSync(args.find((value) => value.startsWith("--output=")).slice(9), "archive");
+              return { status: 0, stdout: "" };
+            }
+            if (command === "git" && args[0] === "ls-tree") return { status: 0, stdout: `100644 blob ${revision}\t${sourcePath}\0` };
+            if (command === "git" && args[0] === "cat-file" && args[1] === "-s") return { status: 0, stdout: `${Buffer.byteLength(contents)}\n` };
+            if (command === "git" && args[0] === "cat-file" && args[1] === "blob") return { status: 0, stdout: contents };
+            if (command === "git" && args[0] === "check-attr") return { status: 0, stdout: [sourcePath, "export-ignore", "unspecified", sourcePath, "export-subst", "unspecified"].join("\0") + "\0" };
+            if (command === "tar") return { status: 0, stdout: `${sourcePath}\n` };
+            if (command === "git" && args[0] === "show") return { status: 0, stdout: args[1] === `${revision}:scripts/secret-scan.mjs` ? secretScannerSource : serverScript };
+            if (isSecretScanCommand(command, args)) {
+              scannerCalled = true;
+              return { status: 0, stdout: "Secret scan passed.\n" };
+            }
+            assert.fail(`Unexpected command: ${command}`);
+          },
+        });
+        if (changed) {
+          await assert.rejects(attempt, /Production command failed|Reviewed verification SQL/u);
+        } else {
+          const result = await attempt;
+          assert.deepEqual(result.lines, ["Offline test stops before remote operations."]);
+        }
+        assert.equal(scannerCalled, !changed);
+        assert.equal(preflightCalled, !changed);
+      });
+    }
+  }
+});
+
 test("deployment accepts a one-byte LF backup sentinel and transfers exact-SHA GHCR provenance", async () => {
   const sequence = [];
   let archivePath;
