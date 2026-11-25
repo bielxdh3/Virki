@@ -111,6 +111,7 @@ test('the RP login form permits only its configured issuer as a cross-origin for
   const { request } = fixture();
   const page = await request('GET', '/');
   assert.equal(page.status, 200);
+  assert.equal(page.headers['referrer-policy'], 'same-origin');
   assert.equal(
     page.headers['content-security-policy'],
     "default-src 'none'; form-action 'self' https://portal.example.test; base-uri 'none'; frame-ancestors 'none'"

@@ -27,6 +27,10 @@ function redirect(res, destination, cookies = []) {
 }
 
 function html(res, contents) {
+  // Chromium sends Origin: null on form POSTs from a no-referrer document.
+  // Preserve the exact same-origin POST check; disclose no cross-origin referrer.
+  // Callback responses and redirects retain the stricter no-referrer policy.
+  res.setHeader('Referrer-Policy', 'same-origin');
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>RP sign-in</title></head><body><main><h1>Independent RP session</h1>${contents}</main></body></html>`);
 }
