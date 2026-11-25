@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
 import { createRpHandler } from './server.mjs';
+import { acceptedPost } from './security.mjs';
 
 const enabled = process.env.VIRKI_RP_CSP_BROWSER_TEST === 'true';
 const configuredIssuer = 'https://portal.example.test';
@@ -32,7 +33,7 @@ async function cspFromRp() {
     writeHead() {}, end() {}
   });
   assert.equal(typeof headers['content-security-policy'], 'string');
-  return headers['content-security-policy'];
+  return headers;
 }
 
 test('real Chromium follows the RP login form redirect only to the pinned issuer', {
@@ -40,11 +41,14 @@ test('real Chromium follows the RP login form redirect only to the pinned issuer
   timeout: 20_000
 }, async () => {
   const { chromium } = await import('playwright');
-  const policy = await cspFromRp();
+  const headers = await cspFromRp();
+  const policy = headers['content-security-policy'];
   let expectedRequests = 0;
   let unauthorizedRequests = 0;
-  const issuer = createServer((_request, response) => {
+  let crossOriginReferrer;
+  const issuer = createServer((request, response) => {
     expectedRequests += 1;
+    crossOriginReferrer = request.headers.referer;
     response.writeHead(200, { 'content-type': 'text/plain' });
     response.end('Issuer navigation received.');
   });
@@ -65,11 +69,16 @@ test('real Chromium follows the RP login form redirect only to the pinned issuer
       if (request.method === 'GET' && request.url === '/') {
         response.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
-          'content-security-policy': browserPolicy
+          'content-security-policy': browserPolicy,
+          'referrer-policy': headers['referrer-policy']
         });
         response.end('<form method="post" action="/login"><button>Sign in through Virki</button></form>');
       } else if (request.method === 'POST' && request.url === '/login') {
-        response.writeHead(303, { location: issuerOrigin + '/auth' });
+        if (!acceptedPost(request, rpOrigin)) {
+          response.writeHead(403).end('Origin rejected');
+          return;
+        }
+        response.writeHead(303, { location: issuerOrigin + '/auth', 'referrer-policy': 'no-referrer' });
         response.end();
       } else {
         response.writeHead(404).end();
@@ -82,9 +91,12 @@ test('real Chromium follows the RP login form redirect only to the pinned issuer
     });
     const page = await browser.newPage();
     await page.goto(rpOrigin);
+    const posted = page.waitForResponse(response => response.url() === rpOrigin + '/login' && response.request().method() === 'POST');
     await page.getByRole('button', { name: 'Sign in through Virki' }).click();
+    assert.equal((await posted).status(), 303, 'The real browser POST must pass the unchanged Origin guard');
     await page.waitForURL(issuerOrigin + '/auth', { timeout: 4_000 });
     assert.equal(expectedRequests, 1, 'The pinned issuer must receive the browser navigation');
+    assert.equal(crossOriginReferrer, undefined, 'The issuer must not receive the RP referrer');
 
     await page.goto(rpOrigin);
     const deniedByCsp = page.waitForEvent('console', {
